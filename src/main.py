@@ -636,6 +636,28 @@ class TradingBot:
             if fv.model_agreement < self.settings.min_model_agreement:
                 continue
 
+            # SANITY CHECK: Reject unrealistic edges (>500% is almost certainly a data bug)
+            # Real arbitrage opportunities are rarely > 50%
+            MAX_REALISTIC_EDGE = 5.0  # 500%
+            if abs(fv.edge) > MAX_REALISTIC_EDGE:
+                logger.warning(
+                    "REJECTING SUSPICIOUS EDGE - likely data issue",
+                    outcome=fv.outcome,
+                    edge=f"{fv.edge:.1%}",
+                    fair_prob=f"{fv.fair_probability:.1%}",
+                    market_prob=f"{fv.market_probability:.1%}",
+                    bucket_low=fv.low_bound,
+                    bucket_high=fv.high_bound,
+                    forecast_mean=f"{fv.kde_mean:.1f}",
+                )
+                print(f"\n⚠️  WARNING: Rejecting suspicious edge for {fv.outcome}")
+                print(f"   Edge: {fv.edge:.1%} (>500% suggests data bug)")
+                print(f"   Fair Value: {fv.fair_probability:.1%}")
+                print(f"   Market Price: {fv.market_probability:.1%}")
+                print(f"   Forecast Mean: {fv.kde_mean:.1f}°")
+                print(f"   Bucket: {fv.low_bound} to {fv.high_bound}")
+                continue
+
             # Find corresponding bucket
             bucket = next(
                 (b for b in market.buckets if b.token_id == fv.token_id),

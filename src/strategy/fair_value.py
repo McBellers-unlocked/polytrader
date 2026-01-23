@@ -150,6 +150,25 @@ class FairValueCalculator:
         in_range = np.sum((temps >= low) & (temps < high))
         probability = float(in_range / len(temps))
 
+        # Debug logging for unusual probabilities (helps diagnose data issues)
+        if probability > 0.7 or probability < 0.01:
+            temp_mean = float(np.mean(temps))
+            temp_std = float(np.std(temps))
+            temp_min = float(np.min(temps))
+            temp_max = float(np.max(temps))
+            logger.debug(
+                "Bucket probability calculation",
+                outcome=bucket.outcome,
+                bucket_low=low,
+                bucket_high=high,
+                bucket_unit=bucket.unit,
+                probability=f"{probability:.1%}",
+                ensemble_mean=f"{temp_mean:.1f}",
+                ensemble_std=f"{temp_std:.1f}",
+                ensemble_range=f"{temp_min:.1f}-{temp_max:.1f}",
+                n_samples=len(temps),
+            )
+
         return probability
 
     def get_expected_value(
