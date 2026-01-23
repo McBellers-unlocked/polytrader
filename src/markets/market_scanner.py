@@ -318,17 +318,17 @@ class MarketScanner:
 
         logger.info("Scanning for weather markets")
 
-        # Fetch markets from Gamma API
-        raw_markets = await self._fetch_gamma_markets()
+        # Fetch events (not individual markets) from Gamma API
+        events = await self._fetch_gamma_events()
 
-        # Filter and parse weather markets
+        # Parse each event into a WeatherMarket with temperature buckets
         weather_markets: list[WeatherMarket] = []
-        for raw in raw_markets:
-            market = self._parse_market(raw)
+        for event_data in events:
+            market = self._parse_event_to_market(event_data)
             if market is None:
                 continue
 
-            # Filter for "Highest temperature" markets
+            # Filter for valid temperature markets
             if not self._is_temperature_market(market):
                 continue
 
@@ -404,9 +404,9 @@ class MarketScanner:
             logger.debug(f"Event fetch error: {slug} error={e}")
             return None
 
-    async def _fetch_gamma_markets(self) -> list[dict[str, Any]]:
-        """Fetch temperature markets from Gamma API using /events/slug/{slug}."""
-        all_markets: list[dict[str, Any]] = []
+    async def _fetch_gamma_events(self) -> list[dict[str, Any]]:
+        """Fetch temperature events from Gamma API using /events/slug/{slug}."""
+        all_events: list[dict[str, Any]] = []
 
         # Generate slugs for cities and upcoming dates
         slugs = self._generate_event_slugs(days_ahead=7)
@@ -434,30 +434,191 @@ class MarketScanner:
 
                 events_found += 1
 
-                # Extract markets from the event
-                event_markets = result.get("markets", [])
-                if not event_markets:
+                # Enrich event data with parsed info
+                result["_city_key"] = city_key
+                result["_target_date"] = target_date.isoformat()
+                result["_slug"] = slug
+
+                all_events.append(result)
+
+        total_markets = sum(len(e.get("markets", [])) for e in all_events)
+        logger.info(f"Found {events_found} active events with {total_markets} markets")
+
+        return all_events
+
+    def _parse_event_to_market(self, event: dict[str, Any]) -> WeatherMarket | None:
+        """
+        Parse an event into a WeatherMarket with temperature buckets.
+
+        Each event contains multiple sub-markets, one per temperature range.
+        Each sub-market has outcomes ["Yes", "No"] with prices.
+        """
+        try:
+            city_key = event.get("_city_key", "")
+            target_date_str = event.get("_target_date", "")
+            slug = event.get("_slug", "")
+
+            if not city_key or city_key not in CITIES:
+                return None
+
+            city = CITIES[city_key]
+
+            # Parse target date
+            target_date_parsed = None
+            if target_date_str:
+                try:
+                    target_date_parsed = date.fromisoformat(target_date_str)
+                except ValueError:
+                    pass
+
+            # Parse end date
+            end_date = None
+            end_str = event.get("endDate", "")
+            if end_str and isinstance(end_str, str):
+                try:
+                    end_date = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    pass
+
+            # Create the market object
+            market = WeatherMarket(
+                condition_id=slug,  # Use slug as ID since event doesn't have one
+                question_id=event.get("id", ""),
+                question=event.get("title", ""),
+                description=event.get("description", ""),
+                market_slug=slug,
+                city=city,
+                city_key=city_key,
+                target_date=target_date_parsed,
+                end_date=end_date,
+                volume=0.0,
+                volume_24h=0.0,
+                liquidity=0.0,
+                is_resolved=event.get("closed", False),
+                resolution_source=event.get("resolutionSource", ""),
+            )
+
+            # Parse each sub-market into a temperature bucket
+            sub_markets = event.get("markets", [])
+            for sub_market in sub_markets:
+                if not isinstance(sub_market, dict):
                     continue
 
-                # Process each market in the event
-                for market_data in event_markets:
-                    if not isinstance(market_data, dict):
-                        continue
+                bucket = self._parse_sub_market_to_bucket(sub_market, city)
+                if bucket:
+                    market.buckets.append(bucket)
+                    # Accumulate volume/liquidity
+                    market.volume += float(sub_market.get("volume", 0) or 0)
+                    market.liquidity += float(sub_market.get("liquidity", 0) or 0)
 
-                    # Enrich market data with event-level info
-                    market_data["_event_slug"] = slug
-                    market_data["_event_city_key"] = city_key
-                    market_data["_event_target_date"] = target_date.isoformat()
-                    market_data["_event_title"] = result.get("title", "")
-                    market_data["_event_description"] = result.get("description", "")
-                    market_data["_event_resolution_source"] = result.get("resolutionSource", "")
-                    market_data["_event_end_date"] = result.get("endDate", "")
+            # Sort buckets by temperature
+            market.buckets.sort(key=lambda b: (
+                b.low_bound if b.low_bound is not None else float('-inf'),
+                b.high_bound if b.high_bound is not None else float('inf')
+            ))
 
-                    all_markets.append(market_data)
+            return market
 
-        logger.info(f"Found {events_found} active events with {len(all_markets)} markets")
+        except Exception as e:
+            logger.warning(f"Failed to parse event: {e}")
+            return None
 
-        return all_markets
+    def _parse_sub_market_to_bucket(
+        self,
+        sub_market: dict[str, Any],
+        city: CityConfig,
+    ) -> TemperatureBucket | None:
+        """
+        Parse a sub-market into a TemperatureBucket.
+
+        Each sub-market represents one temperature range (e.g., "5°F or lower").
+        The temperature range is extracted from the market's question.
+        """
+        try:
+            question = sub_market.get("question", "")
+            if not question:
+                return None
+
+            # Extract the temperature range from the question
+            # Examples:
+            # "Will the highest temperature in Chicago be 5°F or lower?"
+            # "Will the highest temperature in Chicago be between 6-7°F?"
+            # "Will the highest temperature in Chicago be 16°F or higher?"
+            outcome_str = self._extract_temp_range_from_question(question, city.unit)
+            if not outcome_str:
+                return None
+
+            # Get the YES price from outcomePrices
+            outcome_prices = sub_market.get("outcomePrices", "")
+            yes_price = 0.0
+            if outcome_prices:
+                if isinstance(outcome_prices, str):
+                    try:
+                        prices = json.loads(outcome_prices)
+                        if isinstance(prices, list) and len(prices) > 0:
+                            yes_price = float(prices[0])
+                    except (json.JSONDecodeError, ValueError, IndexError):
+                        pass
+                elif isinstance(outcome_prices, list) and len(outcome_prices) > 0:
+                    yes_price = float(outcome_prices[0])
+
+            bucket = TemperatureBucket(
+                token_id=sub_market.get("clobTokenIds", sub_market.get("conditionId", "")),
+                outcome_id=sub_market.get("conditionId", ""),
+                outcome=outcome_str,
+                yes_price=yes_price,
+                no_price=1.0 - yes_price,
+                volume_24h=float(sub_market.get("volume24hr", 0) or 0),
+            )
+
+            # Parse the temperature bounds
+            self._parse_bucket_bounds(bucket, outcome_str, city.unit)
+
+            return bucket
+
+        except Exception as e:
+            logger.debug(f"Failed to parse sub-market: {e}")
+            return None
+
+    def _extract_temp_range_from_question(self, question: str, default_unit: str) -> str | None:
+        """Extract temperature range string from a market question."""
+        q_lower = question.lower()
+
+        # Pattern: "be X°F or lower" / "be X°C or lower"
+        lower_match = re.search(r"be\s+(\d+)\s*°?\s*([FC])?\s+or\s+lower", question, re.IGNORECASE)
+        if lower_match:
+            temp = lower_match.group(1)
+            unit = lower_match.group(2) or default_unit
+            return f"<{temp}°{unit.upper()}"
+
+        # Pattern: "be X°F or higher" / "be X°C or higher"
+        higher_match = re.search(r"be\s+(\d+)\s*°?\s*([FC])?\s+or\s+higher", question, re.IGNORECASE)
+        if higher_match:
+            temp = higher_match.group(1)
+            unit = higher_match.group(2) or default_unit
+            return f"≥{temp}°{unit.upper()}"
+
+        # Pattern: "between X-Y°F" or "be X-Y°F"
+        range_match = re.search(r"(?:between|be)\s+(\d+)\s*[-–]\s*(\d+)\s*°?\s*([FC])?", question, re.IGNORECASE)
+        if range_match:
+            low = range_match.group(1)
+            high = range_match.group(2)
+            unit = range_match.group(3) or default_unit
+            return f"{low}-{high}°{unit.upper()}"
+
+        # Fallback: try to find any temperature pattern
+        temp_match = re.search(r"(\d+)\s*°\s*([FC])", question, re.IGNORECASE)
+        if temp_match:
+            temp = temp_match.group(1)
+            unit = temp_match.group(2)
+            if "lower" in q_lower or "below" in q_lower:
+                return f"<{temp}°{unit.upper()}"
+            elif "higher" in q_lower or "above" in q_lower:
+                return f"≥{temp}°{unit.upper()}"
+            else:
+                return f"{temp}°{unit.upper()}"
+
+        return None
 
     def _parse_market(self, data: dict[str, Any]) -> WeatherMarket | None:
         """Parse a market from Gamma API response."""
