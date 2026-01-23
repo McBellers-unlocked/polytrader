@@ -19,6 +19,7 @@ logger = get_logger(__name__)
 
 # API endpoints
 GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
+GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 CLOB_API_URL = "https://clob.polymarket.com"
 
 
@@ -227,6 +228,22 @@ class MarketScanner:
         "denver": [r"\bdenver\b"],
     }
 
+    # City key to slug name mapping (for generating API slugs)
+    CITY_SLUG_NAMES: dict[str, str] = {
+        "nyc": "new-york-city",
+        "london": "london",
+        "seoul": "seoul",
+        "dallas": "dallas",
+        "toronto": "toronto",
+        "seattle": "seattle",
+        "atlanta": "atlanta",
+        "chicago": "chicago",
+        "miami": "miami",
+        "la": "los-angeles",
+        "phoenix": "phoenix",
+        "denver": "denver",
+    }
+
     # Date patterns
     DATE_PATTERNS = [
         # "January 25" or "Jan 25"
@@ -320,62 +337,113 @@ class MarketScanner:
 
         return weather_markets
 
-    async def _fetch_gamma_markets(self) -> list[dict[str, Any]]:
-        """Fetch markets from Gamma API."""
-        all_markets: list[dict[str, Any]] = []
+    def _generate_event_slugs(self, days_ahead: int = 7) -> list[tuple[str, str, date]]:
+        """
+        Generate event slugs for temperature markets.
 
+        Returns list of (slug, city_key, target_date) tuples.
+        """
+        from datetime import timedelta
+
+        slugs = []
+        today = date.today()
+
+        # Month names for slug generation
+        month_names = [
+            "", "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december"
+        ]
+
+        for city_key, city_slug in self.CITY_SLUG_NAMES.items():
+            # Check that city is in our CITIES config
+            if city_key not in CITIES:
+                continue
+
+            for day_offset in range(days_ahead):
+                target_date = today + timedelta(days=day_offset)
+                month_name = month_names[target_date.month]
+                day_num = target_date.day
+
+                # Format: highest-temperature-in-chicago-on-january-24
+                slug = f"highest-temperature-in-{city_slug}-on-{month_name}-{day_num}"
+                slugs.append((slug, city_key, target_date))
+
+        return slugs
+
+    async def _fetch_event_by_slug(self, slug: str) -> dict[str, Any] | None:
+        """Fetch a single event by its slug."""
         try:
-            # Try fetching with weather tag
-            params = {
-                "active": "true",
-                "closed": "false",
-                "tag": "weather",
-                "limit": 100,
-            }
+            url = f"{GAMMA_EVENTS_URL}/slug/{slug}"
 
             async with self._session.get(
-                GAMMA_API_URL,
-                params=params,
+                url,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status == 200:
-                    data = await response.json()
-                    if isinstance(data, list):
-                        # Only add dict items (API sometimes returns strings)
-                        all_markets.extend(m for m in data if isinstance(m, dict))
-                    logger.debug(f"Fetched {len(all_markets)} markets with weather tag")
-
-            # Also fetch without tag and filter ourselves (backup)
-            params_all = {
-                "active": "true",
-                "closed": "false",
-                "limit": 200,
-            }
-
-            async with self._session.get(
-                GAMMA_API_URL,
-                params=params_all,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if isinstance(data, list):
-                        # Add markets not already in list
-                        existing_ids = {m.get("conditionId") for m in all_markets if isinstance(m, dict)}
-                        for m in data:
-                            # Skip non-dict items (API sometimes returns strings)
-                            if not isinstance(m, dict):
-                                continue
-                            if m.get("conditionId") not in existing_ids:
-                                # Quick filter for weather-related
-                                question = (m.get("question", "") + m.get("description", "")).lower()
-                                if any(kw in question for kw in ["temperature", "weather", "degrees", "°f", "°c"]):
-                                    all_markets.append(m)
-
-            logger.info(f"Total markets to process: {len(all_markets)}")
+                    return await response.json()
+                elif response.status == 404:
+                    # Market doesn't exist for this date/city
+                    return None
+                else:
+                    logger.debug(f"Event fetch failed: {slug} status={response.status}")
+                    return None
 
         except aiohttp.ClientError as e:
-            logger.error(f"Failed to fetch from Gamma API: {e}")
+            logger.debug(f"Event fetch error: {slug} error={e}")
+            return None
+
+    async def _fetch_gamma_markets(self) -> list[dict[str, Any]]:
+        """Fetch temperature markets from Gamma API using /events/slug/{slug}."""
+        all_markets: list[dict[str, Any]] = []
+
+        # Generate slugs for cities and upcoming dates
+        slugs = self._generate_event_slugs(days_ahead=7)
+        logger.info(f"Checking {len(slugs)} potential temperature market slugs")
+
+        # Fetch events in batches to avoid overwhelming the API
+        batch_size = 10
+        events_found = 0
+
+        for i in range(0, len(slugs), batch_size):
+            batch = slugs[i:i + batch_size]
+            tasks = [self._fetch_event_by_slug(slug) for slug, _, _ in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for (slug, city_key, target_date), result in zip(batch, results):
+                if isinstance(result, Exception):
+                    logger.debug(f"Fetch error for {slug}: {result}")
+                    continue
+
+                if result is None:
+                    continue
+
+                if not isinstance(result, dict):
+                    continue
+
+                events_found += 1
+
+                # Extract markets from the event
+                event_markets = result.get("markets", [])
+                if not event_markets:
+                    continue
+
+                # Process each market in the event
+                for market_data in event_markets:
+                    if not isinstance(market_data, dict):
+                        continue
+
+                    # Enrich market data with event-level info
+                    market_data["_event_slug"] = slug
+                    market_data["_event_city_key"] = city_key
+                    market_data["_event_target_date"] = target_date.isoformat()
+                    market_data["_event_title"] = result.get("title", "")
+                    market_data["_event_description"] = result.get("description", "")
+                    market_data["_event_resolution_source"] = result.get("resolutionSource", "")
+                    market_data["_event_end_date"] = result.get("endDate", "")
+
+                    all_markets.append(market_data)
+
+        logger.info(f"Found {events_found} active events with {len(all_markets)} markets")
 
         return all_markets
 
@@ -394,12 +462,24 @@ class MarketScanner:
             question = data.get("question", "")
             description = data.get("description", "")
 
-            # Parse end date
+            # Check for enriched event data (from /events/slug API)
+            event_city_key = data.get("_event_city_key", "")
+            event_target_date_str = data.get("_event_target_date", "")
+            event_description = data.get("_event_description", "")
+            event_resolution_source = data.get("_event_resolution_source", "")
+            event_end_date = data.get("_event_end_date", "")
+
+            # Use event-level description if market description is empty
+            if not description and event_description:
+                description = event_description
+
+            # Parse end date (prefer event-level, then market-level)
             end_date = None
-            end_str = data.get("endDate") or data.get("end_date_iso")
+            end_str = event_end_date or data.get("endDate") or data.get("end_date_iso")
             if end_str:
                 try:
-                    end_date = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                    if isinstance(end_str, str):
+                        end_date = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                 except (ValueError, TypeError):
                     pass
 
@@ -415,18 +495,29 @@ class MarketScanner:
                 volume_24h=float(data.get("volume24hr", 0) or 0),
                 liquidity=float(data.get("liquidity", 0) or 0),
                 is_resolved=data.get("resolved", False),
-                resolution_source=data.get("resolutionSource", ""),
+                resolution_source=event_resolution_source or data.get("resolutionSource", ""),
             )
 
-            # Parse city
-            market.city, market.city_key = self._parse_city(question + " " + description)
+            # Parse city - prefer enriched event data
+            if event_city_key and event_city_key in CITIES:
+                market.city = CITIES[event_city_key]
+                market.city_key = event_city_key
+            else:
+                market.city, market.city_key = self._parse_city(question + " " + description)
 
-            # Parse target date
-            market.target_date = self._parse_date(question + " " + description)
+            # Parse target date - prefer enriched event data
+            if event_target_date_str:
+                try:
+                    market.target_date = date.fromisoformat(event_target_date_str)
+                except ValueError:
+                    market.target_date = self._parse_date(question + " " + description)
+            else:
+                market.target_date = self._parse_date(question + " " + description)
 
-            # Parse temperature buckets from outcomes/tokens
-            tokens = data.get("tokens", data.get("outcomes", []))
-            market.buckets = self._parse_buckets(tokens, market.city)
+            # Parse temperature buckets from outcomes (primary) or tokens (fallback)
+            # The /events/slug API returns outcomes, not tokens
+            outcomes = data.get("outcomes", data.get("tokens", []))
+            market.buckets = self._parse_buckets(outcomes, market.city)
 
             return market
 
@@ -436,16 +527,6 @@ class MarketScanner:
 
     def _is_temperature_market(self, market: WeatherMarket) -> bool:
         """Check if this is a highest temperature market."""
-        text = (market.question + " " + market.description).lower()
-
-        # Must mention temperature
-        if not any(kw in text for kw in ["temperature", "temp", "degrees", "°"]):
-            return False
-
-        # Should be a "highest" or "high" temperature market
-        if not any(kw in text for kw in ["highest", "high temp", "maximum", "max temp"]):
-            return False
-
         # Must have a mapped city
         if market.city is None:
             return False
@@ -453,6 +534,13 @@ class MarketScanner:
         # Must have at least one bucket
         if len(market.buckets) == 0:
             return False
+
+        # If we have question text, validate it's about temperature
+        text = (market.question + " " + market.description).lower()
+        if text.strip():
+            # Must mention temperature or degrees
+            if not any(kw in text for kw in ["temperature", "temp", "degrees", "°", "°f", "°c"]):
+                return False
 
         return True
 
@@ -531,24 +619,42 @@ class MarketScanner:
 
     def _parse_buckets(
         self,
-        tokens: list[dict[str, Any]],
+        tokens: list,
         city: CityConfig | None,
     ) -> list[TemperatureBucket]:
-        """Parse temperature buckets from token data."""
+        """Parse temperature buckets from token/outcome data."""
         buckets: list[TemperatureBucket] = []
         default_unit = city.unit if city else "F"
 
-        for token in tokens:
-            outcome = token.get("outcome", "")
+        for i, token in enumerate(tokens):
+            # Handle both dict format (full market data) and string format (outcome names)
+            if isinstance(token, str):
+                # Outcome is just a string like "5°F or lower"
+                outcome = token
+                token_id = ""
+                outcome_id = ""
+                price = 0.0
+                volume = 0.0
+            elif isinstance(token, dict):
+                outcome = token.get("outcome", token.get("value", ""))
+                if not outcome:
+                    continue
+                token_id = token.get("token_id", token.get("tokenId", ""))
+                outcome_id = token.get("outcome_id", token.get("outcomeId", ""))
+                price = float(token.get("price", 0) or 0)
+                volume = float(token.get("volume", 0) or 0)
+            else:
+                continue
+
             if not outcome:
                 continue
 
             bucket = TemperatureBucket(
-                token_id=token.get("token_id", token.get("tokenId", "")),
-                outcome_id=token.get("outcome_id", ""),
+                token_id=token_id,
+                outcome_id=outcome_id,
                 outcome=outcome,
-                yes_price=float(token.get("price", 0) or 0),
-                volume_24h=float(token.get("volume", 0) or 0),
+                yes_price=price,
+                volume_24h=volume,
             )
 
             # Parse temperature bounds
