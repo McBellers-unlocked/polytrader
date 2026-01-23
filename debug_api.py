@@ -15,6 +15,41 @@ async def debug_api():
     print("=" * 60)
 
     async with aiohttp.ClientSession() as session:
+        # Test 0: Try different API parameters to find weather markets
+        print(f"\n[TEST 0] Try different API query parameters")
+
+        test_params = [
+            {"tag": "weather", "active": "true", "limit": 50},
+            {"tag": "climate", "active": "true", "limit": 50},
+            {"tag": "climate-science", "active": "true", "limit": 50},
+            {"category": "weather", "active": "true", "limit": 50},
+            {"topic": "weather", "active": "true", "limit": 50},
+            {"slug_contains": "temperature", "active": "true", "limit": 50},
+            {"title_contains": "temperature", "active": "true", "limit": 50},
+            {"q": "temperature", "active": "true", "limit": 50},
+            {"search": "temperature", "active": "true", "limit": 50},
+        ]
+
+        for params in test_params:
+            async with session.get(GAMMA_EVENTS_URL, params=params, timeout=30) as response:
+                data = await response.json()
+                count = len(data) if isinstance(data, list) else 0
+                temp_count = 0
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            title = (item.get("title", "") or "").lower()
+                            if "temperature" in title:
+                                temp_count += 1
+                print(f"  {params} -> {count} results, {temp_count} temperature")
+                if temp_count > 0:
+                    print(f"    ^ FOUND TEMPERATURE MARKETS!")
+                    # Show first few
+                    for item in data[:3]:
+                        if isinstance(item, dict) and "temperature" in (item.get("title", "") or "").lower():
+                            print(f"      - {item.get('title', '')[:60]}")
+                            print(f"        slug: {item.get('slug', '')}")
+
         # Test 1: Try EVENTS endpoint - search broadly
         print(f"\n[TEST 1] Fetch from EVENTS endpoint")
         print(f"URL: {GAMMA_EVENTS_URL}")
