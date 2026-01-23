@@ -360,8 +360,11 @@ class MarketScanner:
                     data = await response.json()
                     if isinstance(data, list):
                         # Add markets not already in list
-                        existing_ids = {m.get("conditionId") for m in all_markets}
+                        existing_ids = {m.get("conditionId") for m in all_markets if isinstance(m, dict)}
                         for m in data:
+                            # Skip non-dict items (API sometimes returns strings)
+                            if not isinstance(m, dict):
+                                continue
                             if m.get("conditionId") not in existing_ids:
                                 # Quick filter for weather-related
                                 question = (m.get("question", "") + m.get("description", "")).lower()
