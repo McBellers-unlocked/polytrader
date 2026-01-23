@@ -7,6 +7,8 @@ import json
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+CLOB_API_URL = "https://clob.polymarket.com"
+STRAPI_API_URL = "https://strapi-matic.polymarket.com"
 
 
 async def debug_api():
@@ -150,18 +152,57 @@ async def debug_api():
                 async with session.get(url, timeout=30) as response:
                     print(f"  /markets/{slug}: {response.status}")
 
-        # Test 3: Check what the /markets endpoint returns for comparison
-        print(f"\n[TEST 3] Check /markets endpoint structure")
-        params = {"active": "true", "closed": "false", "limit": 5}
-        async with session.get(GAMMA_API_URL, params=params, timeout=30) as response:
-            print(f"Status: {response.status}")
-            data = await response.json()
-            if isinstance(data, list) and len(data) > 0:
-                item = data[0]
-                if isinstance(item, dict):
-                    print(f"Market keys: {list(item.keys())}")
-                    print(f"Has 'tokens': {'tokens' in item}")
-                    print(f"Has 'outcomes': {'outcomes' in item}")
+        # Test 3: Try other Polymarket APIs
+        print(f"\n[TEST 3] Try other Polymarket API endpoints")
+
+        other_endpoints = [
+            f"{CLOB_API_URL}/markets",
+            f"{STRAPI_API_URL}/markets",
+            f"{STRAPI_API_URL}/events",
+            "https://polymarket.com/api/markets",
+            "https://polymarket.com/api/events",
+            "https://api.polymarket.com/markets",
+        ]
+
+        for endpoint in other_endpoints:
+            try:
+                async with session.get(endpoint, params={"limit": 10}, timeout=10) as response:
+                    print(f"  {response.status}: {endpoint}")
+                    if response.status == 200:
+                        data = await response.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            # Check for temperature
+                            for item in data[:20]:
+                                if isinstance(item, dict):
+                                    q = str(item.get("question", item.get("title", ""))).lower()
+                                    if "temperature" in q:
+                                        print(f"    ^ FOUND TEMPERATURE: {q[:50]}")
+                                        break
+            except Exception as e:
+                print(f"  ERROR: {endpoint} - {type(e).__name__}")
+
+        # Test 4: Try text search on Gamma API
+        print(f"\n[TEST 4] Try Gamma API text search")
+        search_endpoints = [
+            f"{GAMMA_API_URL}?_q=temperature",
+            f"{GAMMA_EVENTS_URL}?_q=temperature",
+            f"{GAMMA_API_URL}?question_contains=temperature",
+            f"{GAMMA_EVENTS_URL}?title_contains=temperature",
+        ]
+
+        for endpoint in search_endpoints:
+            try:
+                async with session.get(endpoint, timeout=10) as response:
+                    print(f"  {response.status}: {endpoint.split('?')[1]}")
+                    if response.status == 200:
+                        data = await response.json()
+                        count = len(data) if isinstance(data, list) else 0
+                        temp_count = sum(1 for item in (data if isinstance(data, list) else [])
+                                        if isinstance(item, dict) and
+                                        "temperature" in str(item.get("question", item.get("title", ""))).lower())
+                        print(f"    Results: {count}, Temperature: {temp_count}")
+            except Exception as e:
+                print(f"  ERROR: {e}")
 
     print("\n" + "=" * 60)
     print("Debug complete")
