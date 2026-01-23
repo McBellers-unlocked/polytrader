@@ -378,6 +378,11 @@ class MarketScanner:
     def _parse_market(self, data: dict[str, Any]) -> WeatherMarket | None:
         """Parse a market from Gamma API response."""
         try:
+            # Ensure data is a dict before parsing
+            if not isinstance(data, dict):
+                logger.debug(f"Skipping non-dict market data: {type(data).__name__}")
+                return None
+
             condition_id = data.get("conditionId", data.get("condition_id", ""))
             if not condition_id:
                 return None

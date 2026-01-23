@@ -139,10 +139,17 @@ class MetarClient:
     ) -> MetarObservation | None:
         """Parse METAR JSON response."""
         try:
-            # Parse observation time
-            obs_time_str = data.get("obsTime")
-            if obs_time_str:
-                obs_time = datetime.fromisoformat(obs_time_str.replace("Z", "+00:00"))
+            # Parse observation time (can be ISO string or Unix timestamp)
+            obs_time_raw = data.get("obsTime")
+            if obs_time_raw:
+                if isinstance(obs_time_raw, (int, float)):
+                    # Unix timestamp
+                    obs_time = datetime.utcfromtimestamp(obs_time_raw)
+                elif isinstance(obs_time_raw, str):
+                    # ISO format string
+                    obs_time = datetime.fromisoformat(obs_time_raw.replace("Z", "+00:00"))
+                else:
+                    obs_time = datetime.utcnow()
             else:
                 obs_time = datetime.utcnow()
 
