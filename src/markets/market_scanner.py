@@ -5,6 +5,7 @@ for trading strategy integration.
 """
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, date, timezone
@@ -527,7 +528,13 @@ class MarketScanner:
 
             # Parse temperature buckets from outcomes (primary) or tokens (fallback)
             # The /events/slug API returns outcomes, not tokens
+            # Note: outcomes may be a JSON string that needs parsing
             outcomes = data.get("outcomes", data.get("tokens", []))
+            if isinstance(outcomes, str):
+                try:
+                    outcomes = json.loads(outcomes)
+                except json.JSONDecodeError:
+                    outcomes = []
             market.buckets = self._parse_buckets(outcomes, market.city)
 
             return market
