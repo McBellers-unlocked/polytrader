@@ -63,6 +63,9 @@ from src.risk.risk_manager import (
 # Data persistence
 from src.execution.datastore import DataStore
 
+# CLI dashboard
+from src.cli.dashboard import Dashboard
+
 logger = get_logger(__name__)
 
 
@@ -1151,6 +1154,24 @@ async def show_status() -> None:
     print("=" * 60)
 
 
+async def show_dashboard(
+    positions: bool = False,
+    pnl: bool = False,
+    opportunities: bool = False,
+) -> None:
+    """Show the rich CLI dashboard."""
+    dashboard = Dashboard()
+
+    if positions:
+        await dashboard.show_positions()
+    elif pnl:
+        await dashboard.show_pnl()
+    elif opportunities:
+        await dashboard.show_opportunities()
+    else:
+        await dashboard.show_full()
+
+
 def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1165,6 +1186,10 @@ Examples:
   python -m src.main scan                Scan for weather markets
   python -m src.main analyze dallas      Analyze Dallas market
   python -m src.main status              Show current status
+  python -m src.main dashboard           Show full dashboard
+  python -m src.main dashboard --positions   Show open positions
+  python -m src.main dashboard --pnl         Show P&L summary
+  python -m src.main dashboard --opportunities  Show active opportunities
         """,
     )
 
@@ -1196,6 +1221,27 @@ Examples:
     # Status command
     subparsers.add_parser("status", help="Show current status")
 
+    # Dashboard command
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="Show rich CLI dashboard",
+    )
+    dashboard_parser.add_argument(
+        "--positions",
+        action="store_true",
+        help="Show only open positions with unrealized P&L",
+    )
+    dashboard_parser.add_argument(
+        "--pnl",
+        action="store_true",
+        help="Show P&L summary for the past week",
+    )
+    dashboard_parser.add_argument(
+        "--opportunities",
+        action="store_true",
+        help="Show active trading opportunities",
+    )
+
     # Top-level shortcuts
     parser.add_argument(
         "--mode", "-m",
@@ -1217,6 +1263,12 @@ Examples:
         asyncio.run(analyze_market(args.city, use_mock=args.mock))
     elif args.command == "status":
         asyncio.run(show_status())
+    elif args.command == "dashboard":
+        asyncio.run(show_dashboard(
+            positions=args.positions,
+            pnl=args.pnl,
+            opportunities=args.opportunities,
+        ))
     else:
         # Default to run
         mode = args.mode or "paper"
