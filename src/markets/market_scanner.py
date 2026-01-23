@@ -341,7 +341,8 @@ class MarketScanner:
                 if response.status == 200:
                     data = await response.json()
                     if isinstance(data, list):
-                        all_markets.extend(data)
+                        # Only add dict items (API sometimes returns strings)
+                        all_markets.extend(m for m in data if isinstance(m, dict))
                     logger.debug(f"Fetched {len(all_markets)} markets with weather tag")
 
             # Also fetch without tag and filter ourselves (backup)
