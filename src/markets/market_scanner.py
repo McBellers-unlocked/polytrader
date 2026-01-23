@@ -738,6 +738,8 @@ def create_mock_markets() -> list[WeatherMarket]:
             no_price=1 - price,
             best_bid=price - 0.01,
             best_ask=price + 0.01,
+            bid_size=500.0,  # $500 liquidity on bid
+            ask_size=500.0,  # $500 liquidity on ask
             spread=0.02,
         )
         nyc_market.buckets.append(bucket)
@@ -782,6 +784,8 @@ def create_mock_markets() -> list[WeatherMarket]:
             no_price=1 - price,
             best_bid=price - 0.01,
             best_ask=price + 0.01,
+            bid_size=500.0,  # $500 liquidity on bid
+            ask_size=500.0,  # $500 liquidity on ask
             spread=0.02,
         )
         dallas_market.buckets.append(bucket)

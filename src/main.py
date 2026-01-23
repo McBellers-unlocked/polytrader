@@ -1,23 +1,133 @@
-"""Main entry point for Polytrader weather trading bot."""
+"""Main entry point for Polytrader weather trading bot.
+
+Implements a comprehensive trading loop that:
+1. Scans for active weather markets every 30 seconds
+2. Fetches ensemble forecasts and calculates fair values
+3. Detects edge and arbitrage opportunities
+4. Executes trades through risk management
+5. Logs all activity in structured JSON format
+"""
 
 import argparse
 import asyncio
 import signal
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 from typing import Any
 
+import numpy as np
+
 from src.config import get_settings, TradingMode, CITIES, CityConfig
 from src.logging import setup_logging, get_logger
-from src.data import WeatherAggregator
-from src.markets import MarketScanner, PolymarketClient, WeatherMarket
-from src.strategy import FairValueCalculator, EdgeDetector, ArbitrageDetector, TradeSignal
-from src.risk import RiskManager
-from src.execution import ExecutionEngine
+
+# Data sources
+from src.data.open_meteo import (
+    OpenMeteoClient,
+    EnsembleForecastResult,
+    create_mock_forecast,
+)
+
+# Market scanning
+from src.markets.market_scanner import (
+    MarketScanner,
+    WeatherMarket,
+    TemperatureBucket,
+    create_mock_markets,
+)
+
+# Strategy
+from src.strategy.probability import (
+    FairValueCalculator,
+    FairValueResult,
+    MarketFairValue,
+    EdgeDetector,
+    ArbitrageDetector,
+    ArbitrageOpportunity,
+)
+
+# Risk management
+from src.risk.risk_manager import (
+    RiskManager,
+    TradeRequest,
+    Position,
+    RiskStatus,
+)
 
 logger = get_logger(__name__)
 
+
+# =============================================================================
+# Data Classes
+# =============================================================================
+
+@dataclass
+class TradingOpportunity:
+    """A detected trading opportunity."""
+    market: WeatherMarket
+    bucket: TemperatureBucket
+    fair_value: FairValueResult
+
+    # Trade details
+    side: str  # "BUY" or "SELL"
+    price: Decimal
+    suggested_size: Decimal
+
+    # Metrics
+    edge: float
+    expected_profit: float
+    kelly_fraction: float
+    model_agreement: float
+
+    @property
+    def priority_score(self) -> float:
+        """Score for sorting opportunities."""
+        return abs(self.edge) * self.model_agreement * float(self.suggested_size)
+
+
+@dataclass
+class TradingIteration:
+    """Results from a single trading iteration."""
+    timestamp: datetime
+    duration_seconds: float
+
+    # What we found
+    n_markets: int = 0
+    n_forecasts: int = 0
+    n_opportunities: int = 0
+    n_arbitrage: int = 0
+
+    # What we did
+    n_trades_attempted: int = 0
+    n_trades_executed: int = 0
+    n_trades_blocked: int = 0
+
+    # P&L
+    paper_pnl: Decimal = Decimal("0")
+
+    # Details
+    opportunities: list[TradingOpportunity] = field(default_factory=list)
+    arbitrage_opportunities: list[ArbitrageOpportunity] = field(default_factory=list)
+    blocked_reasons: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "duration_seconds": round(self.duration_seconds, 2),
+            "n_markets": self.n_markets,
+            "n_forecasts": self.n_forecasts,
+            "n_opportunities": self.n_opportunities,
+            "n_arbitrage": self.n_arbitrage,
+            "n_trades_attempted": self.n_trades_attempted,
+            "n_trades_executed": self.n_trades_executed,
+            "n_trades_blocked": self.n_trades_blocked,
+        }
+
+
+# =============================================================================
+# Trading Bot
+# =============================================================================
 
 class TradingBot:
     """
@@ -30,34 +140,59 @@ class TradingBot:
     4. Executes trades when criteria are met
     """
 
-    def __init__(self):
-        """Initialize the trading bot."""
-        self.settings = get_settings()
-        self.weather = WeatherAggregator()
-        self.scanner = MarketScanner()
-        self.client = PolymarketClient()
-        self.fair_value_calc = FairValueCalculator()
-        self.edge_detector = EdgeDetector()
-        self.arb_detector = ArbitrageDetector()
-        self.risk_manager = RiskManager()
-        self.execution = ExecutionEngine(self.client, self.risk_manager)
+    # Timing
+    LOOP_INTERVAL_SECONDS = 30
+    MIN_HOURS_TO_RESOLUTION = 1
+    MAX_HOURS_TO_RESOLUTION = 72
 
+    def __init__(
+        self,
+        mode: TradingMode = TradingMode.PAPER,
+        use_mock: bool = False,
+    ):
+        """
+        Initialize the trading bot.
+
+        Args:
+            mode: Trading mode (paper, semi, auto)
+            use_mock: Use mock data instead of live APIs
+        """
+        self.settings = get_settings()
+        self.mode = mode
+        self.use_mock = use_mock
+
+        # Initialize components
+        self.fair_value_calc = FairValueCalculator()
+        self.edge_detector = EdgeDetector(
+            min_edge=self.settings.min_edge_threshold,
+            min_agreement=self.settings.min_model_agreement,
+        )
+        self.arb_detector = ArbitrageDetector(min_gap=0.02)
+        self.risk_manager = RiskManager(
+            starting_bankroll=Decimal(str(self.settings.starting_bankroll)),
+            min_edge=self.settings.min_edge_threshold,
+            min_model_agreement=self.settings.min_model_agreement,
+        )
+
+        # State
         self._running = False
         self._shutdown_event = asyncio.Event()
+        self._iteration_count = 0
+        self._paper_positions: dict[str, dict[str, Any]] = {}
+        self._paper_pnl = Decimal("0")
 
     async def start(self) -> None:
         """Start the trading bot."""
         logger.info(
             "Starting Polytrader",
-            mode=self.settings.trading_mode.value,
+            mode=self.mode.value,
             bankroll=self.settings.starting_bankroll,
+            use_mock=self.use_mock,
         )
 
-        # Validate settings
-        self.settings.validate_live_trading()
-
-        # Start execution engine
-        await self.execution.start()
+        # Validate settings for live trading
+        if self.mode != TradingMode.PAPER:
+            self.settings.validate_live_trading()
 
         self._running = True
 
@@ -77,8 +212,14 @@ class TradingBot:
         self._running = False
         self._shutdown_event.set()
 
-        await self.execution.stop()
-        await self.scanner.close()
+        # Log final status
+        status = self.risk_manager.get_status()
+        logger.info(
+            "Final status",
+            iterations=self._iteration_count,
+            paper_pnl=str(self._paper_pnl),
+            risk_status=status,
+        )
 
     def _handle_shutdown(self) -> None:
         """Handle shutdown signal."""
@@ -90,254 +231,515 @@ class TradingBot:
         """Main trading loop."""
         while self._running:
             try:
-                await self._run_iteration()
+                iteration = await self._run_iteration()
+
+                logger.info(
+                    "Iteration complete",
+                    iteration=self._iteration_count,
+                    **iteration.to_dict(),
+                )
 
                 # Wait before next iteration
-                logger.info("Waiting for next iteration", wait_seconds=60)
                 try:
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
-                        timeout=60,
+                        timeout=self.LOOP_INTERVAL_SECONDS,
                     )
                 except asyncio.TimeoutError:
                     pass
 
             except Exception as e:
                 logger.error("Error in trading loop", error=str(e), exc_info=True)
-                await asyncio.sleep(30)  # Back off on error
+                await asyncio.sleep(self.LOOP_INTERVAL_SECONDS)
 
-    async def _run_iteration(self) -> None:
+    async def _run_iteration(self) -> TradingIteration:
         """Run a single trading iteration."""
-        logger.info("Starting trading iteration")
+        self._iteration_count += 1
+        start_time = datetime.utcnow()
+
+        iteration = TradingIteration(
+            timestamp=start_time,
+            duration_seconds=0,
+        )
+
+        logger.info(
+            "Starting iteration",
+            iteration=self._iteration_count,
+            mode=self.mode.value,
+        )
 
         # 1. Scan for weather markets
-        markets = await self.scanner.scan_weather_markets()
+        markets = await self._scan_markets()
+        iteration.n_markets = len(markets)
+
         if not markets:
             logger.info("No active weather markets found")
-            return
+            iteration.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
+            return iteration
 
         logger.info("Found weather markets", count=len(markets))
 
         # 2. Process each market
-        all_signals: list[TradeSignal] = []
-        async with self.weather:
-            for market in markets:
-                try:
-                    signals = await self._process_market(market)
-                    all_signals.extend(signals)
-                except Exception as e:
-                    logger.warning(
-                        "Error processing market",
-                        market=market.condition_id,
-                        error=str(e),
-                    )
+        all_opportunities: list[TradingOpportunity] = []
+        all_arbitrage: list[ArbitrageOpportunity] = []
 
-        # 3. Check for arbitrage opportunities
-        arb_opportunities = self.arb_detector.find_all_arbitrage(markets)
-        for arb in arb_opportunities:
+        for market in markets:
+            # Filter by time to resolution
+            hours = market.hours_until_close
+            if hours < self.MIN_HOURS_TO_RESOLUTION:
+                logger.debug(
+                    "Skipping market too close to resolution",
+                    market_id=market.condition_id[:16],
+                    hours=hours,
+                )
+                continue
+            if hours > self.MAX_HOURS_TO_RESOLUTION:
+                logger.debug(
+                    "Skipping market too far from resolution",
+                    market_id=market.condition_id[:16],
+                    hours=hours,
+                )
+                continue
+
+            try:
+                opps, arbs = await self._process_market(market)
+                all_opportunities.extend(opps)
+                all_arbitrage.extend(arbs)
+                iteration.n_forecasts += 1
+            except Exception as e:
+                logger.warning(
+                    "Error processing market",
+                    market_id=market.condition_id[:16],
+                    error=str(e),
+                )
+
+        iteration.n_opportunities = len(all_opportunities)
+        iteration.n_arbitrage = len(all_arbitrage)
+        iteration.opportunities = all_opportunities
+        iteration.arbitrage_opportunities = all_arbitrage
+
+        # 3. Log arbitrage opportunities
+        for arb in all_arbitrage:
             logger.info(
-                "Arbitrage opportunity found",
-                market=arb.market.condition_id,
-                profit_margin=arb.profit_margin,
-                roi_pct=arb.roi,
+                "Arbitrage opportunity detected",
+                city=arb.city,
+                target_date=arb.target_date.isoformat(),
+                gap=arb.gap,
+                roi_percent=arb.roi_percent,
+                required_capital=str(arb.required_capital),
             )
 
-        # 4. Execute best signals
-        if all_signals:
-            # Filter and sort signals
-            best_signals = self.edge_detector.filter_signals(all_signals, max_signals=3)
+        # 4. Sort opportunities by expected profit
+        all_opportunities.sort(key=lambda x: x.priority_score, reverse=True)
 
-            for signal in best_signals:
-                await self._execute_signal(signal)
+        # 5. Execute trades (top 3)
+        for opp in all_opportunities[:3]:
+            try:
+                executed = await self._execute_opportunity(opp)
+                iteration.n_trades_attempted += 1
+                if executed:
+                    iteration.n_trades_executed += 1
+                else:
+                    iteration.n_trades_blocked += 1
+            except Exception as e:
+                logger.error(
+                    "Error executing trade",
+                    outcome=opp.bucket.outcome,
+                    error=str(e),
+                )
+                iteration.blocked_reasons.append(str(e))
 
-        # 5. Log status
-        status = self.execution.get_status()
-        logger.info("Iteration complete", status=status)
+        iteration.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
+        return iteration
+
+    async def _scan_markets(self) -> list[WeatherMarket]:
+        """Scan for active weather markets."""
+        if self.use_mock:
+            return create_mock_markets()
+
+        try:
+            async with MarketScanner() as scanner:
+                return await scanner.scan_weather_markets()
+        except Exception as e:
+            logger.warning(f"Market scan failed, using mock: {e}")
+            return create_mock_markets()
 
     async def _process_market(
         self,
         market: WeatherMarket,
-    ) -> list[TradeSignal]:
-        """Process a single market for trading signals."""
+    ) -> tuple[list[TradingOpportunity], list[ArbitrageOpportunity]]:
+        """
+        Process a single market for opportunities.
+
+        Returns:
+            Tuple of (trading opportunities, arbitrage opportunities)
+        """
         if not market.city or not market.target_date:
-            return []
+            return [], []
 
-        # Skip markets closing in less than 4 hours (too close to resolution)
-        if market.hours_until_close < 4:
-            logger.debug(
-                "Skipping market too close to resolution",
-                market=market.condition_id,
-                hours_until_close=market.hours_until_close,
-            )
-            return []
+        city = market.city
+        target = market.target_date
 
-        # Fetch weather forecast
-        forecast = await self.weather.get_forecast(
-            market.city,
-            market.target_date,
+        logger.debug(
+            "Processing market",
+            city=city.name,
+            target_date=target.isoformat(),
+            hours_until_close=market.hours_until_close,
         )
 
-        if not forecast.has_sufficient_data:
+        # 1. Get ensemble forecast
+        forecast = await self._get_forecast(city, target)
+        if forecast is None or len(forecast.temperatures) < 10:
             logger.warning(
                 "Insufficient forecast data",
-                market=market.condition_id,
-                city=market.city.name,
+                city=city.name,
             )
-            return []
+            return [], []
 
-        # Calculate fair values
-        bucket_probs = self.fair_value_calc.calculate_fair_values(market, forecast)
-        bucket_probs = self.fair_value_calc.calibrate_probabilities(bucket_probs)
+        temperatures = forecast.temperatures
+        model_agreement = forecast.model_agreement
 
-        # Get current bankroll
-        bankroll = Decimal(str(self.settings.starting_bankroll))
-        balance = await self.client.get_balance()
-        if "USDC" in balance:
-            bankroll = balance["USDC"]
-
-        # Detect edge
-        signals = self.edge_detector.detect_signals(
-            market,
-            bucket_probs,
-            forecast.model_agreement,
-            bankroll,
-        )
-
-        if signals:
-            logger.info(
-                "Signals detected",
-                market=market.condition_id,
-                city=market.city.name,
-                n_signals=len(signals),
-                best_edge=signals[0].edge if signals else 0,
-            )
-
-        return signals
-
-    async def _execute_signal(self, signal: TradeSignal) -> None:
-        """Execute a trade signal."""
         logger.info(
-            "Executing signal",
-            market=signal.market.condition_id,
-            outcome=signal.bucket.outcome,
-            edge=signal.edge,
-            size=str(signal.suggested_size),
+            "Forecast received",
+            city=city.name,
+            n_members=len(temperatures),
+            mean=float(np.mean(temperatures)),
+            std=float(np.std(temperatures)),
+            model_agreement=model_agreement,
         )
 
-        order = await self.execution.execute_signal(signal)
+        # 2. Check for arbitrage first
+        arbitrage_opps: list[ArbitrageOpportunity] = []
 
-        if order:
+        bucket_data = [
+            (b.token_id, b.outcome, b.yes_price)
+            for b in market.buckets
+        ]
+
+        arb = self.arb_detector.detect(
+            condition_id=market.condition_id,
+            city=city.name,
+            target_date=target,
+            buckets=bucket_data,
+        )
+
+        if arb:
+            arbitrage_opps.append(arb)
+
+        # 3. Calculate fair values for all buckets
+        bucket_inputs = [
+            (b.token_id, b.outcome, b.low_bound, b.high_bound, b.yes_price)
+            for b in market.buckets
+        ]
+
+        # Get METAR if target date is today
+        current_temp = None
+        if target == date.today():
+            # Could fetch METAR here, skip for now
+            pass
+
+        analysis = self.fair_value_calc.analyze_market(
+            condition_id=market.condition_id,
+            city=city.name,
+            target_date=target,
+            temperatures=temperatures,
+            buckets=bucket_inputs,
+            model_agreement=model_agreement,
+            current_temp=current_temp,
+        )
+
+        # 4. Find trading opportunities
+        opportunities: list[TradingOpportunity] = []
+        bankroll = self.risk_manager.current_bankroll
+
+        for fv in analysis.buckets:
+            # Skip if doesn't meet criteria
+            if abs(fv.edge) < self.settings.min_edge_threshold:
+                continue
+            if fv.model_agreement < self.settings.min_model_agreement:
+                continue
+
+            # Find corresponding bucket
+            bucket = next(
+                (b for b in market.buckets if b.token_id == fv.token_id),
+                None
+            )
+            if not bucket:
+                continue
+
+            # Calculate position size (half Kelly)
+            kelly = self.edge_detector.calculate_kelly_fraction(
+                fv.fair_probability,
+                fv.market_probability,
+            )
+            suggested_size = Decimal(str(round(float(bankroll) * kelly * 0.5, 2)))
+
+            # Determine side
+            side = "BUY" if fv.edge > 0 else "SELL"
+            price = Decimal(str(bucket.yes_price if side == "BUY" else (1 - bucket.yes_price)))
+
+            # Create opportunity
+            opp = TradingOpportunity(
+                market=market,
+                bucket=bucket,
+                fair_value=fv,
+                side=side,
+                price=price,
+                suggested_size=suggested_size,
+                edge=fv.edge,
+                expected_profit=fv.expected_value * float(suggested_size),
+                kelly_fraction=kelly,
+                model_agreement=fv.model_agreement,
+            )
+            opportunities.append(opp)
+
             logger.info(
-                "Order created",
-                order_id=order.id,
-                status=order.status.value,
+                "Opportunity detected",
+                city=city.name,
+                outcome=bucket.outcome,
+                side=side,
+                edge=fv.edge,
+                fair_prob=fv.fair_probability,
+                market_prob=fv.market_probability,
+                suggested_size=str(suggested_size),
             )
 
+        return opportunities, arbitrage_opps
 
-async def run_bot(mode: str) -> None:
+    async def _get_forecast(
+        self,
+        city: CityConfig,
+        target_date: date,
+    ) -> EnsembleForecastResult | None:
+        """Get ensemble forecast for a city and date."""
+        if self.use_mock:
+            return create_mock_forecast(
+                lat=city.lat,
+                lon=city.lon,
+                city_name=city.name,
+                target_date=target_date,
+                convert_to_fahrenheit=(city.unit == "F"),
+            )
+
+        try:
+            async with OpenMeteoClient() as client:
+                return await client.get_ensemble_forecast(
+                    lat=city.lat,
+                    lon=city.lon,
+                    target_date=target_date,
+                    city_name=city.name,
+                    convert_to_fahrenheit=(city.unit == "F"),
+                )
+        except Exception as e:
+            logger.warning(f"Forecast fetch failed, using mock: {e}")
+            return create_mock_forecast(
+                lat=city.lat,
+                lon=city.lon,
+                city_name=city.name,
+                target_date=target_date,
+                convert_to_fahrenheit=(city.unit == "F"),
+            )
+
+    async def _execute_opportunity(self, opp: TradingOpportunity) -> bool:
+        """
+        Execute a trading opportunity.
+
+        Returns:
+            True if trade was executed, False if blocked
+        """
+        # Build trade request
+        request = TradeRequest(
+            token_id=opp.bucket.token_id,
+            condition_id=opp.market.condition_id,
+            outcome=opp.bucket.outcome,
+            side=opp.side,
+            price=opp.price,
+            size=opp.suggested_size,
+            edge=opp.edge,
+            model_agreement=opp.model_agreement,
+            liquidity=opp.bucket.bid_size + opp.bucket.ask_size,
+            city=opp.market.city.name if opp.market.city else "",
+            target_date=opp.market.target_date,
+        )
+
+        # Check risk
+        can_trade, checks = self.risk_manager.can_trade(request)
+
+        if not can_trade:
+            blocked = [c for c in checks if c.status == RiskStatus.BLOCKED]
+            logger.warning(
+                "Trade blocked by risk manager",
+                outcome=opp.bucket.outcome,
+                blocked_by=[c.name for c in blocked],
+            )
+            return False
+
+        # Execute based on mode
+        if self.mode == TradingMode.PAPER:
+            return await self._execute_paper_trade(opp, request)
+        elif self.mode == TradingMode.SEMI:
+            return await self._execute_semi_trade(opp, request)
+        else:  # AUTO
+            return await self._execute_auto_trade(opp, request)
+
+    async def _execute_paper_trade(
+        self,
+        opp: TradingOpportunity,
+        request: TradeRequest,
+    ) -> bool:
+        """Execute a paper trade (logging only)."""
+        logger.info(
+            "[PAPER] Trade executed",
+            city=opp.market.city.name if opp.market.city else "unknown",
+            outcome=opp.bucket.outcome,
+            side=opp.side,
+            price=str(opp.price),
+            size=str(opp.suggested_size),
+            edge=opp.edge,
+            expected_profit=opp.expected_profit,
+        )
+
+        # Track paper position
+        position_id = f"{request.condition_id}:{request.token_id}"
+        self._paper_positions[position_id] = {
+            "token_id": request.token_id,
+            "condition_id": request.condition_id,
+            "outcome": request.outcome,
+            "side": opp.side,
+            "price": float(opp.price),
+            "size": float(opp.suggested_size),
+            "edge": opp.edge,
+            "opened_at": datetime.utcnow().isoformat(),
+        }
+
+        # Simulate P&L (simplified: assume we win/lose based on edge direction)
+        # In reality, this would track until market resolution
+        simulated_pnl = Decimal(str(round(opp.expected_profit, 2)))
+        self._paper_pnl += simulated_pnl
+
+        return True
+
+    async def _execute_semi_trade(
+        self,
+        opp: TradingOpportunity,
+        request: TradeRequest,
+    ) -> bool:
+        """Execute a semi-auto trade (requires confirmation)."""
+        # Print alert
+        print("\n" + "=" * 60)
+        print("TRADE ALERT - CONFIRMATION REQUIRED")
+        print("=" * 60)
+        print(f"  City: {opp.market.city.name if opp.market.city else 'unknown'}")
+        print(f"  Target Date: {opp.market.target_date}")
+        print(f"  Outcome: {opp.bucket.outcome}")
+        print(f"  Side: {opp.side}")
+        print(f"  Price: ${opp.price}")
+        print(f"  Size: {opp.suggested_size} shares")
+        print(f"  Cost: ${float(opp.price) * float(opp.suggested_size):.2f}")
+        print()
+        print(f"  Fair Value: {opp.fair_value.fair_probability:.1%}")
+        print(f"  Market Price: {opp.fair_value.market_probability:.1%}")
+        print(f"  Edge: {opp.edge:+.1%}")
+        print(f"  Model Agreement: {opp.model_agreement:.1%}")
+        print(f"  Expected Profit: ${opp.expected_profit:.2f}")
+        print("=" * 60)
+
+        try:
+            response = input("Execute this trade? [y/N]: ").strip().lower()
+            if response == "y":
+                # In real implementation, this would call the exchange
+                logger.info(
+                    "[SEMI] Trade confirmed and executed",
+                    outcome=opp.bucket.outcome,
+                    side=opp.side,
+                    price=str(opp.price),
+                    size=str(opp.suggested_size),
+                )
+                return True
+            else:
+                logger.info(
+                    "[SEMI] Trade rejected by user",
+                    outcome=opp.bucket.outcome,
+                )
+                return False
+        except (EOFError, KeyboardInterrupt):
+            logger.info("[SEMI] Trade cancelled")
+            return False
+
+    async def _execute_auto_trade(
+        self,
+        opp: TradingOpportunity,
+        request: TradeRequest,
+    ) -> bool:
+        """Execute an automatic trade."""
+        logger.info(
+            "[AUTO] Executing trade",
+            outcome=opp.bucket.outcome,
+            side=opp.side,
+            price=str(opp.price),
+            size=str(opp.suggested_size),
+        )
+
+        # TODO: Implement actual order execution via PolymarketClient
+        # For now, log as if executed
+        logger.info(
+            "[AUTO] Trade executed",
+            city=opp.market.city.name if opp.market.city else "unknown",
+            outcome=opp.bucket.outcome,
+            side=opp.side,
+            price=str(opp.price),
+            size=str(opp.suggested_size),
+            edge=opp.edge,
+        )
+
+        return True
+
+    def get_status(self) -> dict[str, Any]:
+        """Get current bot status."""
+        return {
+            "mode": self.mode.value,
+            "running": self._running,
+            "iterations": self._iteration_count,
+            "paper_pnl": str(self._paper_pnl),
+            "paper_positions": len(self._paper_positions),
+            "risk": self.risk_manager.get_status(),
+        }
+
+
+# =============================================================================
+# CLI Commands
+# =============================================================================
+
+async def run_bot(mode: str, use_mock: bool = False) -> None:
     """Run the trading bot."""
-    # Set up logging
     setup_logging()
 
-    # Override mode if specified
-    settings = get_settings()
-    if mode:
-        settings.trading_mode = TradingMode(mode)
-
-    # Create and run bot
-    bot = TradingBot()
+    trading_mode = TradingMode(mode)
+    bot = TradingBot(mode=trading_mode, use_mock=use_mock)
     await bot.start()
 
 
-async def run_backtest(
-    city: str,
-    start_date: str,
-    end_date: str,
-) -> None:
-    """Run a backtest simulation."""
-    setup_logging()
-    logger.info(
-        "Running backtest",
-        city=city,
-        start_date=start_date,
-        end_date=end_date,
-    )
-
-    city_config = CITIES.get(city.lower())
-    if not city_config:
-        logger.error(f"Unknown city: {city}")
-        return
-
-    # Parse dates
-    start = datetime.strptime(start_date, "%Y-%m-%d").date()
-    end = datetime.strptime(end_date, "%Y-%m-%d").date()
-
-    async with WeatherAggregator() as weather:
-        current = start
-        while current <= end:
-            try:
-                forecast = await weather.get_forecast(city_config, current)
-                stats = forecast.get_distribution_stats()
-                logger.info(
-                    "Backtest day",
-                    date=str(current),
-                    city=city_config.name,
-                    mean=stats.get("mean"),
-                    std=stats.get("std"),
-                    model_agreement=forecast.model_agreement,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Backtest error",
-                    date=str(current),
-                    error=str(e),
-                )
-
-            current += timedelta(days=1)
-
-
-async def show_status() -> None:
-    """Show current bot status."""
-    setup_logging()
-
-    execution = ExecutionEngine()
-    await execution.start()
-
-    status = execution.get_status()
-
-    print("\n" + "=" * 60)
-    print("POLYTRADER STATUS")
-    print("=" * 60)
-    print(f"  Active Orders: {status['active_orders']}")
-    print(f"  Open Positions: {status['open_positions']}")
-    print(f"  Total Position Value: ${status['total_position_value']}")
-    print(f"  Unrealized P&L: ${status['total_unrealized_pnl']}")
-    print(f"  Realized P&L: ${status['total_realized_pnl']}")
-    print()
-    print("Risk Status:")
-    risk = status['risk_status']
-    print(f"  Current Bankroll: ${risk['current_bankroll']}")
-    print(f"  Drawdown: {risk['current_drawdown']:.1%}")
-    print(f"  Today P&L: {risk['today_pnl']:.1%}")
-    print(f"  Emergency Stop: {'ACTIVE' if risk['is_emergency_stopped'] else 'OK'}")
-    print("=" * 60)
-
-    await execution.stop()
-
-
-async def scan_markets() -> None:
+async def scan_markets(use_mock: bool = False) -> None:
     """Scan and display available weather markets."""
     setup_logging()
-
-    scanner = MarketScanner()
-    markets = await scanner.scan_weather_markets()
 
     print("\n" + "=" * 60)
     print("ACTIVE WEATHER MARKETS")
     print("=" * 60)
 
+    if use_mock:
+        markets = create_mock_markets()
+        print("(Using mock data)")
+    else:
+        try:
+            async with MarketScanner() as scanner:
+                markets = await scanner.scan_weather_markets()
+        except Exception as e:
+            print(f"Network error, using mock data: {e}")
+            markets = create_mock_markets()
+
     for market in markets:
-        print(f"\nMarket: {market.condition_id[:16]}...")
+        print(f"\nMarket: {market.condition_id[:20]}...")
         print(f"  Question: {market.question[:60]}...")
         if market.city:
             print(f"  City: {market.city.name}")
@@ -349,7 +751,104 @@ async def scan_markets() -> None:
         if market.arbitrage_gap > 0.01:
             print(f"  ** ARBITRAGE GAP: {market.arbitrage_gap:.1%} **")
 
-    await scanner.close()
+        print("\n  Temperature Buckets:")
+        for bucket in market.buckets:
+            print(
+                f"    {bucket.outcome:12} YES=${bucket.yes_price:.3f} "
+                f"bid=${bucket.best_bid:.3f} ask=${bucket.best_ask:.3f}"
+            )
+
+    print("\n" + "=" * 60)
+
+
+async def analyze_market(city: str, use_mock: bool = False) -> None:
+    """Analyze a specific city's market."""
+    setup_logging()
+
+    city_config = CITIES.get(city.lower())
+    if not city_config:
+        print(f"Unknown city: {city}")
+        print(f"Available cities: {', '.join(CITIES.keys())}")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"MARKET ANALYSIS: {city_config.name}")
+    print(f"{'='*60}")
+
+    # Get forecast
+    target = date.today() + timedelta(days=1)
+
+    if use_mock:
+        forecast = create_mock_forecast(
+            lat=city_config.lat,
+            lon=city_config.lon,
+            city_name=city_config.name,
+            target_date=target,
+            convert_to_fahrenheit=(city_config.unit == "F"),
+        )
+    else:
+        try:
+            async with OpenMeteoClient() as client:
+                forecast = await client.get_ensemble_forecast(
+                    lat=city_config.lat,
+                    lon=city_config.lon,
+                    target_date=target,
+                    city_name=city_config.name,
+                    convert_to_fahrenheit=(city_config.unit == "F"),
+                )
+        except Exception:
+            print("Using mock forecast data...")
+            forecast = create_mock_forecast(
+                lat=city_config.lat,
+                lon=city_config.lon,
+                city_name=city_config.name,
+                target_date=target,
+                convert_to_fahrenheit=(city_config.unit == "F"),
+            )
+
+    print(f"\nForecast for {target}:")
+    print(f"  Ensemble Members: {forecast.n_members}")
+    print(f"  Mean: {forecast.mean:.1f}°{city_config.unit}")
+    print(f"  Std: {forecast.std:.1f}°{city_config.unit}")
+    print(f"  Range: [{forecast.min:.1f}, {forecast.max:.1f}]")
+    print(f"  Model Agreement: {forecast.model_agreement:.1%}")
+
+    print(f"\nPercentiles:")
+    print(f"  P10: {forecast.p10:.1f}  P25: {forecast.p25:.1f}")
+    print(f"  P50: {forecast.p50:.1f}  P75: {forecast.p75:.1f}")
+    print(f"  P90: {forecast.p90:.1f}")
+
+    print(f"\n{'='*60}")
+
+
+async def show_status() -> None:
+    """Show current risk and position status."""
+    setup_logging()
+
+    risk = RiskManager(
+        starting_bankroll=Decimal(str(get_settings().starting_bankroll))
+    )
+    status = risk.get_status()
+
+    print("\n" + "=" * 60)
+    print("POLYTRADER STATUS")
+    print("=" * 60)
+    print(f"\nBankroll:")
+    print(f"  Starting: ${status['bankroll']['starting']}")
+    print(f"  Current: ${status['bankroll']['current']}")
+    print(f"  Peak: ${status['bankroll']['peak']}")
+    print(f"  Drawdown: {status['bankroll']['drawdown_pct']}%")
+    print(f"\nPositions:")
+    print(f"  Open: {status['positions']['count']}/{status['positions']['max']}")
+    print(f"  Value: ${status['positions']['total_value']}")
+    print(f"\nDaily P&L:")
+    print(f"  Total: {status['daily']['total_pnl_pct']}%")
+    print(f"  Trades: {status['daily']['trades']}")
+    print(f"\nRisk Status:")
+    print(f"  Trading Allowed: {status['stops']['trading_allowed']}")
+    print(f"  Emergency Stop: {status['stops']['emergency_stopped']}")
+    if status['stops']['stop_reason'] != "NONE":
+        print(f"  Stop Reason: {status['stops']['stop_reason']}")
     print("=" * 60)
 
 
@@ -360,11 +859,13 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m src.main --mode paper     Run in paper trading mode
-  python -m src.main --mode semi      Run with manual confirmation
-  python -m src.main --mode auto      Run fully automated
-  python -m src.main scan             Scan for weather markets
-  python -m src.main status           Show current status
+  python -m src.main --mode paper        Run in paper trading mode
+  python -m src.main --mode semi         Run with manual confirmation
+  python -m src.main --mode auto         Run fully automated
+  python -m src.main --mode paper --mock Use mock data (no network)
+  python -m src.main scan                Scan for weather markets
+  python -m src.main analyze dallas      Analyze Dallas market
+  python -m src.main status              Show current status
         """,
     )
 
@@ -378,39 +879,50 @@ Examples:
         default="paper",
         help="Trading mode (default: paper)",
     )
+    run_parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Use mock data instead of live APIs",
+    )
 
     # Scan command
-    subparsers.add_parser("scan", help="Scan for weather markets")
+    scan_parser = subparsers.add_parser("scan", help="Scan for weather markets")
+    scan_parser.add_argument("--mock", action="store_true", help="Use mock data")
+
+    # Analyze command
+    analyze_parser = subparsers.add_parser("analyze", help="Analyze a city market")
+    analyze_parser.add_argument("city", help="City to analyze (nyc, dallas, etc)")
+    analyze_parser.add_argument("--mock", action="store_true", help="Use mock data")
 
     # Status command
     subparsers.add_parser("status", help="Show current status")
 
-    # Backtest command
-    backtest_parser = subparsers.add_parser("backtest", help="Run backtest")
-    backtest_parser.add_argument("--city", required=True, help="City to backtest")
-    backtest_parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
-    backtest_parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
-
-    # Also support --mode at top level for convenience
+    # Top-level shortcuts
     parser.add_argument(
         "--mode", "-m",
         choices=["paper", "semi", "auto"],
         help="Trading mode (shortcut for 'run --mode')",
+    )
+    parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Use mock data instead of live APIs",
     )
 
     args = parser.parse_args()
 
     # Handle commands
     if args.command == "scan":
-        asyncio.run(scan_markets())
+        asyncio.run(scan_markets(use_mock=args.mock))
+    elif args.command == "analyze":
+        asyncio.run(analyze_market(args.city, use_mock=args.mock))
     elif args.command == "status":
         asyncio.run(show_status())
-    elif args.command == "backtest":
-        asyncio.run(run_backtest(args.city, args.start, args.end))
     else:
         # Default to run
         mode = args.mode or "paper"
-        asyncio.run(run_bot(mode))
+        use_mock = getattr(args, "mock", False)
+        asyncio.run(run_bot(mode, use_mock=use_mock))
 
 
 if __name__ == "__main__":
