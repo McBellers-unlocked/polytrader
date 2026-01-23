@@ -696,19 +696,23 @@ class MarketScanner:
 
 def create_mock_markets() -> list[WeatherMarket]:
     """Create mock markets for testing without network access."""
-    markets = []
+    from datetime import timedelta
 
-    # Mock NYC market
+    markets = []
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    # Mock NYC market - TODAY (for METAR nowcasting demo)
     nyc_market = WeatherMarket(
-        condition_id="mock_nyc_jan25",
+        condition_id=f"mock_nyc_{today.isoformat()}",
         question_id="mock_q_nyc",
-        question="What will be the highest temperature in New York City on January 25, 2026?",
+        question=f"What will be the highest temperature in New York City on {today.strftime('%B %d, %Y')}?",
         description="Resolves based on Weather Underground data from KNYC station.",
-        market_slug="nyc-temp-jan25",
+        market_slug=f"nyc-temp-{today.isoformat()}",
         city=CITIES["nyc"],
         city_key="nyc",
-        target_date=date(2026, 1, 25),
-        end_date=datetime(2026, 1, 25, 23, 59, 59),
+        target_date=today,  # TODAY - METAR nowcasting active
+        end_date=datetime.combine(today, datetime.max.time()),
         volume=15000,
         liquidity=5000,
     )
@@ -746,17 +750,17 @@ def create_mock_markets() -> list[WeatherMarket]:
 
     markets.append(nyc_market)
 
-    # Mock Dallas market
+    # Mock Dallas market - TOMORROW (no METAR, just forecast)
     dallas_market = WeatherMarket(
-        condition_id="mock_dallas_jan26",
+        condition_id=f"mock_dallas_{tomorrow.isoformat()}",
         question_id="mock_q_dallas",
-        question="What will be the highest temperature in Dallas on January 26, 2026?",
+        question=f"What will be the highest temperature in Dallas on {tomorrow.strftime('%B %d, %Y')}?",
         description="Resolves based on Weather Underground data from KDAL station.",
-        market_slug="dallas-temp-jan26",
+        market_slug=f"dallas-temp-{tomorrow.isoformat()}",
         city=CITIES["dallas"],
         city_key="dallas",
-        target_date=date(2026, 1, 26),
-        end_date=datetime(2026, 1, 26, 23, 59, 59),
+        target_date=tomorrow,  # TOMORROW - no METAR constraint
+        end_date=datetime.combine(tomorrow, datetime.max.time()),
         volume=8000,
         liquidity=3000,
     )

@@ -28,6 +28,11 @@ from src.data.open_meteo import (
     EnsembleForecastResult,
     create_mock_forecast,
 )
+from src.data.nowcasting import (
+    MetarNowcaster,
+    TemperatureConstraint,
+    create_mock_constraint,
+)
 
 # Market scanning
 from src.markets.market_scanner import (
@@ -80,10 +85,30 @@ class TradingOpportunity:
     kelly_fraction: float
     model_agreement: float
 
+    # Nowcasting (if applicable)
+    metar_constraint: TemperatureConstraint | None = None
+
     @property
     def priority_score(self) -> float:
         """Score for sorting opportunities."""
-        return abs(self.edge) * self.model_agreement * float(self.suggested_size)
+        base_score = abs(self.edge) * self.model_agreement * float(self.suggested_size)
+
+        # Boost priority when METAR constraint is active
+        # (higher confidence = better edge)
+        if self.metar_constraint and self.metar_constraint.is_active:
+            metar_boost = 1.0 + self.metar_constraint.confidence
+            return base_score * metar_boost
+
+        return base_score
+
+    @property
+    def has_metar_edge(self) -> bool:
+        """Check if this opportunity benefits from METAR constraint."""
+        return (
+            self.metar_constraint is not None and
+            self.metar_constraint.is_active and
+            self.metar_constraint.confidence > 0.5
+        )
 
 
 @dataclass
@@ -97,6 +122,10 @@ class TradingIteration:
     n_forecasts: int = 0
     n_opportunities: int = 0
     n_arbitrage: int = 0
+
+    # METAR nowcasting stats
+    n_metar_constraints: int = 0
+    metar_opportunities: int = 0  # Opportunities boosted by METAR
 
     # What we did
     n_trades_attempted: int = 0
@@ -119,6 +148,8 @@ class TradingIteration:
             "n_forecasts": self.n_forecasts,
             "n_opportunities": self.n_opportunities,
             "n_arbitrage": self.n_arbitrage,
+            "n_metar_constraints": self.n_metar_constraints,
+            "metar_opportunities": self.metar_opportunities,
             "n_trades_attempted": self.n_trades_attempted,
             "n_trades_executed": self.n_trades_executed,
             "n_trades_blocked": self.n_trades_blocked,
@@ -174,6 +205,9 @@ class TradingBot:
             min_model_agreement=self.settings.min_model_agreement,
         )
 
+        # METAR nowcasting for real-time constraints
+        self.nowcaster = MetarNowcaster()
+
         # State
         self._running = False
         self._shutdown_event = asyncio.Event()
@@ -196,6 +230,10 @@ class TradingBot:
 
         self._running = True
 
+        # Start METAR nowcaster (background updates every 15 min)
+        if not self.use_mock:
+            await self.nowcaster.start()
+
         # Set up signal handlers
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -211,6 +249,9 @@ class TradingBot:
         logger.info("Stopping Polytrader")
         self._running = False
         self._shutdown_event.set()
+
+        # Stop nowcaster
+        await self.nowcaster.stop()
 
         # Log final status
         status = self.risk_manager.get_status()
@@ -318,6 +359,14 @@ class TradingBot:
         iteration.opportunities = all_opportunities
         iteration.arbitrage_opportunities = all_arbitrage
 
+        # Count METAR-boosted opportunities
+        metar_opps = [o for o in all_opportunities if o.has_metar_edge]
+        iteration.metar_opportunities = len(metar_opps)
+        iteration.n_metar_constraints = len(set(
+            o.metar_constraint.city for o in metar_opps
+            if o.metar_constraint
+        ))
+
         # 3. Log arbitrage opportunities
         for arb in all_arbitrage:
             logger.info(
@@ -408,7 +457,40 @@ class TradingBot:
             model_agreement=model_agreement,
         )
 
-        # 2. Check for arbitrage first
+        # 2. Apply METAR nowcasting constraint if target is today
+        current_temp = None
+        constraint: TemperatureConstraint | None = None
+
+        if target == date.today():
+            if self.use_mock:
+                # Create mock constraint for afternoon trading demo
+                # Use 4 hours until trading close (simulates 2pm observation)
+                # Trading window is 10am-6pm, so 4h means 2pm local time
+                constraint = create_mock_constraint(
+                    city=city,
+                    hours_until_close=4.0,  # Simulate 2pm (prime trading window)
+                )
+            else:
+                constraint = await self.nowcaster.fetch_constraint(city, target)
+
+            if constraint and constraint.is_active:
+                current_temp = constraint.max_temp_observed
+
+                # Apply constraint to temperature distribution
+                temperatures = self.nowcaster.apply_constraint(temperatures, constraint)
+
+                logger.info(
+                    "METAR constraint applied",
+                    city=city.name,
+                    max_temp_observed=constraint.max_temp_observed,
+                    hours_until_close=constraint.hours_until_close,
+                    confidence=constraint.confidence,
+                    uncertainty_reduction=constraint.uncertainty_reduction,
+                    constrained_mean=float(np.mean(temperatures)),
+                    constrained_std=float(np.std(temperatures)),
+                )
+
+        # 3. Check for arbitrage first
         arbitrage_opps: list[ArbitrageOpportunity] = []
 
         bucket_data = [
@@ -426,17 +508,11 @@ class TradingBot:
         if arb:
             arbitrage_opps.append(arb)
 
-        # 3. Calculate fair values for all buckets
+        # 4. Calculate fair values for all buckets
         bucket_inputs = [
             (b.token_id, b.outcome, b.low_bound, b.high_bound, b.yes_price)
             for b in market.buckets
         ]
-
-        # Get METAR if target date is today
-        current_temp = None
-        if target == date.today():
-            # Could fetch METAR here, skip for now
-            pass
 
         analysis = self.fair_value_calc.analyze_market(
             condition_id=market.condition_id,
@@ -490,6 +566,7 @@ class TradingBot:
                 expected_profit=fv.expected_value * float(suggested_size),
                 kelly_fraction=kelly,
                 model_agreement=fv.model_agreement,
+                metar_constraint=constraint,
             )
             opportunities.append(opp)
 
@@ -502,6 +579,7 @@ class TradingBot:
                 fair_prob=fv.fair_probability,
                 market_prob=fv.market_probability,
                 suggested_size=str(suggested_size),
+                metar_boosted=opp.has_metar_edge,
             )
 
         return opportunities, arbitrage_opps
