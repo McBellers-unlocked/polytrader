@@ -640,12 +640,15 @@ class TradingBot:
             if not bucket:
                 continue
 
-            # Calculate position size (half Kelly)
+            # Calculate position size (half Kelly, capped at max_position_pct)
             kelly = self.edge_detector.calculate_kelly_fraction(
                 fv.fair_probability,
                 fv.market_probability,
             )
-            suggested_size = Decimal(str(round(float(bankroll) * kelly * 0.5, 2)))
+            half_kelly = kelly * 0.5
+            max_position = float(bankroll) * self.settings.max_position_pct
+            kelly_position = float(bankroll) * half_kelly
+            suggested_size = Decimal(str(round(min(kelly_position, max_position), 2)))
 
             # Determine side
             side = "BUY" if fv.edge > 0 else "SELL"
