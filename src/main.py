@@ -60,6 +60,9 @@ from src.risk.risk_manager import (
     RiskStatus,
 )
 
+# Data persistence
+from src.execution.datastore import DataStore
+
 logger = get_logger(__name__)
 
 
@@ -208,12 +211,23 @@ class TradingBot:
         # METAR nowcasting for real-time constraints
         self.nowcaster = MetarNowcaster()
 
+        # Data persistence
+        self.datastore = DataStore()
+
         # State
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._iteration_count = 0
         self._paper_positions: dict[str, dict[str, Any]] = {}
         self._paper_pnl = Decimal("0")
+        self._last_price_snapshot = datetime.min
+        self._daily_stats: dict[str, Any] = {
+            "opportunities": 0,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "metar_trades": 0,
+        }
 
     async def start(self) -> None:
         """Start the trading bot."""
@@ -229,6 +243,9 @@ class TradingBot:
             self.settings.validate_live_trading()
 
         self._running = True
+
+        # Connect to data store
+        await self.datastore.connect()
 
         # Start METAR nowcaster (background updates every 15 min)
         if not self.use_mock:
@@ -252,6 +269,12 @@ class TradingBot:
 
         # Stop nowcaster
         await self.nowcaster.stop()
+
+        # Save daily summary
+        await self._save_daily_summary()
+
+        # Close data store
+        await self.datastore.close()
 
         # Log final status
         status = self.risk_manager.get_status()
@@ -367,7 +390,7 @@ class TradingBot:
             if o.metar_constraint
         ))
 
-        # 3. Log arbitrage opportunities
+        # 3. Save and log arbitrage opportunities
         for arb in all_arbitrage:
             logger.info(
                 "Arbitrage opportunity detected",
@@ -377,26 +400,89 @@ class TradingBot:
                 roi_percent=arb.roi_percent,
                 required_capital=str(arb.required_capital),
             )
+            # Persist arbitrage opportunity
+            await self.datastore.save_arbitrage_opportunity(
+                timestamp=start_time,
+                condition_id=arb.condition_id,
+                city=arb.city,
+                target_date=arb.target_date,
+                total_yes_price=arb.total_yes_price,
+                gap=arb.gap,
+                profit_margin=arb.profit_margin,
+                roi_percent=arb.roi_percent,
+                required_capital=float(arb.required_capital),
+                guaranteed_profit=float(arb.guaranteed_profit),
+            )
 
-        # 4. Sort opportunities by expected profit
+        # 4. Save price snapshots every 5 minutes
+        await self._maybe_save_price_snapshots(markets, start_time)
+
+        # Update daily stats
+        self._daily_stats["opportunities"] += len(all_opportunities)
+
+        # 5. Sort opportunities by expected profit
         all_opportunities.sort(key=lambda x: x.priority_score, reverse=True)
 
-        # 5. Execute trades (top 3)
-        for opp in all_opportunities[:3]:
+        # Track trade results for each opportunity
+        trade_results: dict[int, tuple[bool, str | None]] = {}
+
+        # 6. Execute trades (top 3)
+        for i, opp in enumerate(all_opportunities[:3]):
             try:
-                executed = await self._execute_opportunity(opp)
+                executed, blocked_reason = await self._execute_opportunity(opp)
+                trade_results[i] = (executed, blocked_reason)
                 iteration.n_trades_attempted += 1
                 if executed:
                     iteration.n_trades_executed += 1
+                    self._daily_stats["trades"] += 1
+                    if opp.has_metar_edge:
+                        self._daily_stats["metar_trades"] += 1
+
+                    # Save executed trade to datastore
+                    await self.datastore.save_trade(
+                        timestamp=start_time,
+                        opportunity_id=None,  # Set after saving opportunity
+                        condition_id=opp.market.condition_id,
+                        token_id=opp.bucket.token_id,
+                        city=opp.market.city.name if opp.market.city else "unknown",
+                        target_date=opp.market.target_date or date.today(),
+                        outcome=opp.bucket.outcome,
+                        side=opp.side,
+                        price=float(opp.price),
+                        size=float(opp.suggested_size),
+                        fair_probability=opp.fair_value.fair_probability,
+                        market_probability=opp.fair_value.market_probability,
+                        edge=opp.edge,
+                        expected_profit=opp.expected_profit,
+                        trading_mode=self.mode.value,
+                    )
                 else:
                     iteration.n_trades_blocked += 1
+                    if blocked_reason:
+                        iteration.blocked_reasons.append(blocked_reason)
             except Exception as e:
                 logger.error(
                     "Error executing trade",
                     outcome=opp.bucket.outcome,
                     error=str(e),
                 )
+                trade_results[i] = (False, str(e))
                 iteration.blocked_reasons.append(str(e))
+
+        # 7. Save all opportunities to datastore (with trade status)
+        for i, opp in enumerate(all_opportunities):
+            was_traded = False
+            blocked_reason = None
+            if i < 3 and i in trade_results:
+                was_traded, blocked_reason = trade_results[i]
+                # Only mark as traded if actually executed
+                was_traded = was_traded and blocked_reason is None
+            await self._save_opportunity(
+                opp,
+                start_time,
+                was_traded=was_traded,
+                blocked_reason=blocked_reason,
+            )
 
         iteration.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
         return iteration
@@ -455,6 +541,14 @@ class TradingBot:
             mean=float(np.mean(temperatures)),
             std=float(np.std(temperatures)),
             model_agreement=model_agreement,
+        )
+
+        # Save forecast snapshot for backtesting
+        await self._save_forecast_snapshot(
+            city=city,
+            target_date=target,
+            forecast=forecast,
+            timestamp=datetime.utcnow(),
         )
 
         # 2. Apply METAR nowcasting constraint if target is today
@@ -618,12 +712,15 @@ class TradingBot:
                 convert_to_fahrenheit=(city.unit == "F"),
             )
 
-    async def _execute_opportunity(self, opp: TradingOpportunity) -> bool:
+    async def _execute_opportunity(
+        self,
+        opp: TradingOpportunity,
+    ) -> tuple[bool, str | None]:
         """
         Execute a trading opportunity.
 
         Returns:
-            True if trade was executed, False if blocked
+            Tuple of (executed: bool, blocked_reason: str | None)
         """
         # Build trade request
         request = TradeRequest(
@@ -645,20 +742,144 @@ class TradingBot:
 
         if not can_trade:
             blocked = [c for c in checks if c.status == RiskStatus.BLOCKED]
+            blocked_reasons = [c.name for c in blocked]
             logger.warning(
                 "Trade blocked by risk manager",
                 outcome=opp.bucket.outcome,
-                blocked_by=[c.name for c in blocked],
+                blocked_by=blocked_reasons,
             )
-            return False
+            return False, ", ".join(blocked_reasons)
 
         # Execute based on mode
         if self.mode == TradingMode.PAPER:
-            return await self._execute_paper_trade(opp, request)
+            executed = await self._execute_paper_trade(opp, request)
         elif self.mode == TradingMode.SEMI:
-            return await self._execute_semi_trade(opp, request)
+            executed = await self._execute_semi_trade(opp, request)
         else:  # AUTO
-            return await self._execute_auto_trade(opp, request)
+            executed = await self._execute_auto_trade(opp, request)
+
+        return executed, None
+
+    async def _save_opportunity(
+        self,
+        opp: TradingOpportunity,
+        timestamp: datetime,
+        was_traded: bool = False,
+        blocked_reason: str | None = None,
+    ) -> int:
+        """Save an opportunity to the data store."""
+        return await self.datastore.save_opportunity(
+            timestamp=timestamp,
+            condition_id=opp.market.condition_id,
+            token_id=opp.bucket.token_id,
+            city=opp.market.city.name if opp.market.city else "unknown",
+            target_date=opp.market.target_date or date.today(),
+            outcome=opp.bucket.outcome,
+            market_price=float(opp.price),
+            fair_probability=opp.fair_value.fair_probability,
+            edge=opp.edge,
+            side=opp.side,
+            suggested_size=float(opp.suggested_size),
+            expected_profit=opp.expected_profit,
+            kelly_fraction=opp.kelly_fraction,
+            model_agreement=opp.model_agreement,
+            confidence=opp.fair_value.confidence,
+            metar_boosted=opp.has_metar_edge,
+            metar_max_temp=opp.metar_constraint.max_temp_observed if opp.metar_constraint else None,
+            metar_confidence=opp.metar_constraint.confidence if opp.metar_constraint else None,
+            was_traded=was_traded,
+            trade_blocked_reason=blocked_reason,
+        )
+
+    async def _maybe_save_price_snapshots(
+        self,
+        markets: list[WeatherMarket],
+        timestamp: datetime,
+    ) -> None:
+        """Save price snapshots every 5 minutes."""
+        # Check if 5 minutes have passed since last snapshot
+        elapsed = (timestamp - self._last_price_snapshot).total_seconds()
+        if elapsed < 300:  # 5 minutes
+            return
+
+        self._last_price_snapshot = timestamp
+
+        for market in markets:
+            if not market.city or not market.target_date:
+                continue
+
+            for bucket in market.buckets:
+                await self.datastore.save_price_snapshot(
+                    timestamp=timestamp,
+                    condition_id=market.condition_id,
+                    token_id=bucket.token_id,
+                    city=market.city.name,
+                    target_date=market.target_date,
+                    outcome=bucket.outcome,
+                    yes_price=bucket.yes_price,
+                    no_price=1.0 - bucket.yes_price,
+                    best_bid=bucket.best_bid,
+                    best_ask=bucket.best_ask,
+                    bid_size=bucket.bid_size,
+                    ask_size=bucket.ask_size,
+                    spread=bucket.best_ask - bucket.best_bid if bucket.best_ask and bucket.best_bid else None,
+                )
+
+        logger.debug("Saved price snapshots", n_markets=len(markets))
+
+    async def _save_daily_summary(self) -> None:
+        """Save daily summary when stopping."""
+        today = date.today()
+        status = self.risk_manager.get_status()
+
+        await self.datastore.save_daily_summary(
+            summary_date=today,
+            starting_bankroll=float(status["bankroll"]["starting"]),
+            ending_bankroll=float(status["bankroll"]["current"]),
+            realized_pnl=float(self._paper_pnl),
+            unrealized_pnl=0.0,  # Would calculate from open positions
+            n_opportunities=self._daily_stats["opportunities"],
+            n_trades=self._daily_stats["trades"],
+            n_wins=self._daily_stats["wins"],
+            n_losses=self._daily_stats["losses"],
+            n_metar_constraints=0,  # Would track during iteration
+            n_metar_trades=self._daily_stats["metar_trades"],
+            max_drawdown_pct=float(status["bankroll"]["drawdown_pct"]),
+            positions_at_close=len(self._paper_positions),
+        )
+
+        logger.info(
+            "Saved daily summary",
+            date=today.isoformat(),
+            pnl=str(self._paper_pnl),
+            trades=self._daily_stats["trades"],
+        )
+
+    async def _save_forecast_snapshot(
+        self,
+        city: CityConfig,
+        target_date: date,
+        forecast: EnsembleForecastResult,
+        timestamp: datetime,
+    ) -> None:
+        """Save a forecast snapshot to the data store."""
+        await self.datastore.save_forecast_snapshot(
+            timestamp=timestamp,
+            city=city.name,
+            target_date=target_date,
+            n_members=forecast.n_members,
+            mean=forecast.mean,
+            std=forecast.std,
+            min_temp=forecast.min,
+            max_temp=forecast.max,
+            p10=forecast.p10,
+            p25=forecast.p25,
+            p50=forecast.p50,
+            p75=forecast.p75,
+            p90=forecast.p90,
+            model_agreement=forecast.model_agreement,
+            model_means=forecast.model_means,
+        )
 
     async def _execute_paper_trade(
         self,
