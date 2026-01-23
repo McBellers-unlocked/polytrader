@@ -107,31 +107,48 @@ async def debug_api():
                     if isinstance(item, dict):
                         print(f"  - {item.get('title', 'N/A')[:70]}")
 
-        # Test 2: Try different slug formats for temperature events
-        print(f"\n[TEST 2] Try different event slug formats")
+        # Test 2: Try the EXACT slug format from working URL
+        print(f"\n[TEST 2] Try exact slug formats from polymarket.com")
         slugs_to_try = [
-            "highest-temperature-in-london-on-january-24",  # Tomorrow
-            "highest-temperature-in-london-on-january-25",
+            # From user's URL: https://polymarket.com/event/highest-temperature-in-chicago-on-january-24
+            "highest-temperature-in-chicago-on-january-24",
+            "highest-temperature-in-london-on-january-24",
+            "highest-temperature-in-atlanta-on-january-24",
+            "highest-temperature-in-seoul-on-january-24",
+            "highest-temperature-in-miami-on-january-24",
             "highest-temperature-in-new-york-city-on-january-24",
-            "highest-temp-london-january-24",
-            "london-temperature-january-24",
+            "highest-temperature-in-nyc-on-january-24",
         ]
 
+        found_any = False
         for slug in slugs_to_try:
             url = f"{GAMMA_EVENTS_URL}/{slug}"
             async with session.get(url, timeout=30) as response:
                 status = response.status
+                print(f"  {status}: {slug}")
                 if status == 200:
+                    found_any = True
                     data = await response.json()
+                    print(f"    Keys: {list(data.keys())[:10]}")
                     markets = data.get("markets", [])
-                    print(f"  FOUND: {slug} -> {len(markets)} markets")
-                    if markets:
-                        print(f"         First market: {markets[0].get('question', 'N/A')[:50]}...")
-                    break
-                else:
-                    print(f"  {status}: {slug}")
-        else:
-            print("  No temperature events found with these slugs")
+                    print(f"    Markets: {len(markets)}")
+                    if markets and isinstance(markets[0], dict):
+                        m = markets[0]
+                        print(f"    First market question: {m.get('question', 'N/A')[:50]}")
+                        print(f"    First market conditionId: {m.get('conditionId', 'N/A')[:30]}")
+                        print(f"    Has outcomes: {'outcomes' in m}, Has tokens: {'tokens' in m}")
+                        outcomes = m.get("outcomes", m.get("tokens", []))
+                        print(f"    Outcomes count: {len(outcomes) if outcomes else 0}")
+                        if outcomes:
+                            print(f"    First outcome: {outcomes[0] if outcomes else 'N/A'}")
+
+        if not found_any:
+            print("  No events found - trying /markets endpoint directly...")
+            # Maybe they're accessible via /markets with the slug
+            for slug in slugs_to_try[:3]:
+                url = f"{GAMMA_API_URL}/{slug}"
+                async with session.get(url, timeout=30) as response:
+                    print(f"  /markets/{slug}: {response.status}")
 
         # Test 3: Check what the /markets endpoint returns for comparison
         print(f"\n[TEST 3] Check /markets endpoint structure")
