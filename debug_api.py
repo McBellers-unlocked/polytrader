@@ -15,40 +15,56 @@ async def debug_api():
     print("=" * 60)
 
     async with aiohttp.ClientSession() as session:
-        # Test 0: Try different API parameters to find weather markets
-        print(f"\n[TEST 0] Try different API query parameters")
+        # Test 0: Search MARKETS endpoint (not events) with high limit
+        print(f"\n[TEST 0] Search /markets endpoint with high limit")
 
-        test_params = [
-            {"tag": "weather", "active": "true", "limit": 50},
-            {"tag": "climate", "active": "true", "limit": 50},
-            {"tag": "climate-science", "active": "true", "limit": 50},
-            {"category": "weather", "active": "true", "limit": 50},
-            {"topic": "weather", "active": "true", "limit": 50},
-            {"slug_contains": "temperature", "active": "true", "limit": 50},
-            {"title_contains": "temperature", "active": "true", "limit": 50},
-            {"q": "temperature", "active": "true", "limit": 50},
-            {"search": "temperature", "active": "true", "limit": 50},
-        ]
-
-        for params in test_params:
-            async with session.get(GAMMA_EVENTS_URL, params=params, timeout=30) as response:
+        # Try markets endpoint with very high limit
+        for limit in [500, 1000]:
+            params = {"active": "true", "closed": "false", "limit": limit}
+            async with session.get(GAMMA_API_URL, params=params, timeout=60) as response:
                 data = await response.json()
                 count = len(data) if isinstance(data, list) else 0
                 temp_count = 0
+                temp_samples = []
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            q = (item.get("question", "") or "").lower()
+                            if "temperature" in q or "highest temp" in q:
+                                temp_count += 1
+                                if len(temp_samples) < 5:
+                                    temp_samples.append(item)
+                print(f"  /markets limit={limit} -> {count} results, {temp_count} temperature markets")
+                if temp_samples:
+                    print(f"    FOUND TEMPERATURE MARKETS!")
+                    for item in temp_samples:
+                        print(f"      - {item.get('question', '')[:60]}")
+                        print(f"        conditionId: {item.get('conditionId', '')[:30]}...")
+                        print(f"        slug: {item.get('slug', '')}")
+
+        # Try events with very high limit
+        print(f"\n  Trying /events with high limits...")
+        for limit in [500, 1000]:
+            params = {"active": "true", "closed": "false", "limit": limit}
+            async with session.get(GAMMA_EVENTS_URL, params=params, timeout=60) as response:
+                data = await response.json()
+                count = len(data) if isinstance(data, list) else 0
+                temp_count = 0
+                temp_samples = []
                 if isinstance(data, list):
                     for item in data:
                         if isinstance(item, dict):
                             title = (item.get("title", "") or "").lower()
                             if "temperature" in title:
                                 temp_count += 1
-                print(f"  {params} -> {count} results, {temp_count} temperature")
-                if temp_count > 0:
-                    print(f"    ^ FOUND TEMPERATURE MARKETS!")
-                    # Show first few
-                    for item in data[:3]:
-                        if isinstance(item, dict) and "temperature" in (item.get("title", "") or "").lower():
-                            print(f"      - {item.get('title', '')[:60]}")
-                            print(f"        slug: {item.get('slug', '')}")
+                                if len(temp_samples) < 5:
+                                    temp_samples.append(item)
+                print(f"  /events limit={limit} -> {count} results, {temp_count} temperature events")
+                if temp_samples:
+                    print(f"    FOUND TEMPERATURE EVENTS!")
+                    for item in temp_samples:
+                        print(f"      - {item.get('title', '')[:60]}")
+                        print(f"        slug: {item.get('slug', '')}")
 
         # Test 1: Try EVENTS endpoint - search broadly
         print(f"\n[TEST 1] Fetch from EVENTS endpoint")
