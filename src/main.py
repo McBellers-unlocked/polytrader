@@ -1242,6 +1242,20 @@ Examples:
         help="Show active trading opportunities",
     )
 
+    # Web server command
+    web_parser = subparsers.add_parser("web", help="Start web dashboard server")
+    web_parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="Host to bind to (default: 0.0.0.0)",
+    )
+    web_parser.add_argument(
+        "--port", "-p",
+        type=int,
+        default=8000,
+        help="Port to listen on (default: 8000)",
+    )
+
     # Top-level shortcuts
     parser.add_argument(
         "--mode", "-m",
@@ -1269,6 +1283,10 @@ Examples:
             pnl=args.pnl,
             opportunities=args.opportunities,
         ))
+    elif args.command == "web":
+        from src.web.server import run_server
+        print(f"Starting web server at http://{args.host}:{args.port}")
+        run_server(host=args.host, port=args.port)
     else:
         # Default to run
         mode = args.mode or "paper"

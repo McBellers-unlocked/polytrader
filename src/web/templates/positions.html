@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Positions - Polytrader{% endblock %}
+{% block content %}
+<h1 class="text-3xl font-bold mb-8">Open Positions</h1>
+<div class="card rounded-xl p-6">
+    <table class="w-full">
+        <thead>
+            <tr class="text-gray-400 text-left border-b border-white/10">
+                <th class="pb-4">City</th>
+                <th class="pb-4">Outcome</th>
+                <th class="pb-4">Entry Time</th>
+                <th class="pb-4">Entry Price</th>
+                <th class="pb-4">Current Price</th>
+                <th class="pb-4">Size</th>
+                <th class="pb-4">Unrealized P&L</th>
+                <th class="pb-4">Entry Edge</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for pos in positions %}
+            {% set unrealized = (pos.current_price - pos.entry_price) * pos.current_size %}
+            <tr class="border-b border-white/5">
+                <td class="py-4 font-medium">{{ pos.city }}</td>
+                <td class="py-4">{{ pos.outcome }}</td>
+                <td class="py-4 text-gray-400">{{ pos.entry_time[:19] if pos.entry_time else '-' }}</td>
+                <td class="py-4">${{ "%.4f"|format(pos.entry_price) }}</td>
+                <td class="py-4">${{ "%.4f"|format(pos.current_price) }}</td>
+                <td class="py-4">{{ "%.0f"|format(pos.current_size) }} shares</td>
+                <td class="py-4 font-medium {% if unrealized >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                    ${{ "%+.2f"|format(unrealized) }}
+                </td>
+                <td class="py-4">{{ "%.1f"|format(pos.entry_edge * 100) }}%</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="8" class="py-12 text-center text-gray-500">No open positions</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

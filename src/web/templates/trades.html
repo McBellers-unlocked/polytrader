@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Trades - Polytrader{% endblock %}
+{% block content %}
+<h1 class="text-3xl font-bold mb-8">Trade History</h1>
+<div class="card rounded-xl p-6">
+    <table class="w-full">
+        <thead>
+            <tr class="text-gray-400 text-left border-b border-white/10">
+                <th class="pb-4">Time</th>
+                <th class="pb-4">City</th>
+                <th class="pb-4">Outcome</th>
+                <th class="pb-4">Side</th>
+                <th class="pb-4">Price</th>
+                <th class="pb-4">Size</th>
+                <th class="pb-4">Edge</th>
+                <th class="pb-4">Expected Profit</th>
+                <th class="pb-4">Mode</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for trade in trades %}
+            <tr class="border-b border-white/5">
+                <td class="py-4 text-gray-400">{{ trade.timestamp[11:19] if trade.timestamp else '-' }}</td>
+                <td class="py-4 font-medium">{{ trade.city }}</td>
+                <td class="py-4">{{ trade.outcome }}</td>
+                <td class="py-4 {% if trade.side == 'BUY' %}text-green-400{% else %}text-red-400{% endif %}">
+                    {{ trade.side }}
+                </td>
+                <td class="py-4">${{ "%.4f"|format(trade.price) }}</td>
+                <td class="py-4">{{ "%.0f"|format(trade.size) }}</td>
+                <td class="py-4 {% if trade.edge > 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                    {{ "%+.1f"|format(trade.edge * 100) }}%
+                </td>
+                <td class="py-4">${{ "%.2f"|format(trade.expected_profit) }}</td>
+                <td class="py-4">
+                    <span class="px-2 py-1 rounded text-xs
+                        {% if trade.trading_mode == 'paper' %}bg-blue-500/20 text-blue-300
+                        {% elif trade.trading_mode == 'semi' %}bg-yellow-500/20 text-yellow-300
+                        {% else %}bg-green-500/20 text-green-300{% endif %}">
+                        {{ trade.trading_mode }}
+                    </span>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="9" class="py-12 text-center text-gray-500">No trades executed yet</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
