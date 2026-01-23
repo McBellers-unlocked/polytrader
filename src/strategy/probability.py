@@ -546,8 +546,10 @@ class EdgeDetector:
         Kelly formula: f* = (bp - q) / b
         where b = odds, p = prob of winning, q = prob of losing
 
+        Handles both BUY (fair_prob > market_price) and SELL (fair_prob < market_price).
+
         Args:
-            fair_prob: Our estimated probability
+            fair_prob: Our estimated probability for YES
             market_price: Market YES price
 
         Returns:
@@ -556,10 +558,21 @@ class EdgeDetector:
         if market_price <= 0 or market_price >= 1:
             return 0.0
 
-        # Odds for buying YES at price p
-        b = (1 - market_price) / market_price
-        p = fair_prob
-        q = 1 - fair_prob
+        if fair_prob >= market_price:
+            # BUY opportunity: YES is underpriced, buy YES
+            # Odds for buying YES at price p: payout is (1-p), stake is p
+            b = (1 - market_price) / market_price
+            p = fair_prob
+            q = 1 - fair_prob
+        else:
+            # SELL opportunity: YES is overpriced, buy NO (sell YES)
+            # Odds for buying NO at price (1-p): payout is p, stake is (1-p)
+            b = market_price / (1 - market_price)
+            p = 1 - fair_prob  # Probability NO wins
+            q = fair_prob  # Probability YES wins
+
+        if b <= 0:
+            return 0.0
 
         kelly = (b * p - q) / b
 
