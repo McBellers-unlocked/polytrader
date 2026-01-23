@@ -7,7 +7,7 @@ for trading strategy integration.
 import asyncio
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Any
 
 import aiohttp
@@ -145,15 +145,26 @@ class WeatherMarket:
         """Check if market is still active for trading."""
         if self.is_resolved:
             return False
-        if self.end_date and datetime.utcnow() >= self.end_date:
-            return False
+        if self.end_date:
+            now = datetime.now(timezone.utc)
+            # Handle both naive and aware datetimes
+            end = self.end_date
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=timezone.utc)
+            if now >= end:
+                return False
         return True
 
     @property
     def hours_until_close(self) -> float:
         """Hours remaining until market closes."""
         if self.end_date:
-            delta = self.end_date - datetime.utcnow()
+            now = datetime.now(timezone.utc)
+            # Handle both naive and aware datetimes
+            end = self.end_date
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=timezone.utc)
+            delta = end - now
             return max(0, delta.total_seconds() / 3600)
         return float('inf')
 
