@@ -41,6 +41,7 @@ from src.markets.market_scanner import (
     TemperatureBucket,
     create_mock_markets,
 )
+from src.markets.client import PolymarketClient, OrderSide
 
 # Strategy
 from src.strategy.probability import (
@@ -213,6 +214,9 @@ class TradingBot:
 
         # METAR nowcasting for real-time constraints
         self.nowcaster = MetarNowcaster()
+
+        # Polymarket client for order execution
+        self.poly_client = PolymarketClient()
 
         # Data persistence
         self.datastore = DataStore()
@@ -952,15 +956,32 @@ class TradingBot:
         try:
             response = input("Execute this trade? [y/N]: ").strip().lower()
             if response == "y":
-                # In real implementation, this would call the exchange
-                logger.info(
-                    "[SEMI] Trade confirmed and executed",
-                    outcome=opp.bucket.outcome,
-                    side=opp.side,
-                    price=str(opp.price),
-                    size=str(opp.suggested_size),
+                # Execute the order via Polymarket client
+                order_side = OrderSide.BUY if opp.side == "BUY" else OrderSide.SELL
+                result = await self.poly_client.place_order(
+                    token_id=opp.bucket.token_id,
+                    side=order_side,
+                    price=opp.price,
+                    size=opp.suggested_size,
                 )
-                return True
+
+                if result.success:
+                    logger.info(
+                        "[SEMI] Trade confirmed and executed",
+                        outcome=opp.bucket.outcome,
+                        side=opp.side,
+                        price=str(opp.price),
+                        size=str(opp.suggested_size),
+                        order_id=result.order_id,
+                    )
+                    return True
+                else:
+                    logger.error(
+                        "[SEMI] Trade execution failed",
+                        outcome=opp.bucket.outcome,
+                        error=result.message,
+                    )
+                    return False
             else:
                 logger.info(
                     "[SEMI] Trade rejected by user",
@@ -985,19 +1006,34 @@ class TradingBot:
             size=str(opp.suggested_size),
         )
 
-        # TODO: Implement actual order execution via PolymarketClient
-        # For now, log as if executed
-        logger.info(
-            "[AUTO] Trade executed",
-            city=opp.market.city.name if opp.market.city else "unknown",
-            outcome=opp.bucket.outcome,
-            side=opp.side,
-            price=str(opp.price),
-            size=str(opp.suggested_size),
-            edge=opp.edge,
+        # Execute the order via Polymarket client
+        order_side = OrderSide.BUY if opp.side == "BUY" else OrderSide.SELL
+        result = await self.poly_client.place_order(
+            token_id=opp.bucket.token_id,
+            side=order_side,
+            price=opp.price,
+            size=opp.suggested_size,
         )
 
-        return True
+        if result.success:
+            logger.info(
+                "[AUTO] Trade executed",
+                city=opp.market.city.name if opp.market.city else "unknown",
+                outcome=opp.bucket.outcome,
+                side=opp.side,
+                price=str(opp.price),
+                size=str(opp.suggested_size),
+                edge=opp.edge,
+                order_id=result.order_id,
+            )
+            return True
+        else:
+            logger.error(
+                "[AUTO] Trade execution failed",
+                outcome=opp.bucket.outcome,
+                error=result.message,
+            )
+            return False
 
     def get_status(self) -> dict[str, Any]:
         """Get current bot status."""
