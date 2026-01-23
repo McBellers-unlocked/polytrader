@@ -96,6 +96,30 @@ CITIES: dict[str, CityConfig] = {
         unit="F",
         timezone="America/New_York",
     ),
+    "chicago": CityConfig(
+        name="Chicago",
+        lat=41.88,
+        lon=-87.63,
+        metar="KORD",
+        unit="F",
+        timezone="America/Chicago",
+    ),
+    "miami": CityConfig(
+        name="Miami",
+        lat=25.76,
+        lon=-80.19,
+        metar="KMIA",
+        unit="F",
+        timezone="America/New_York",
+    ),
+    "ankara": CityConfig(
+        name="Ankara",
+        lat=39.93,
+        lon=32.86,
+        metar="LTAC",
+        unit="C",
+        timezone="Europe/Istanbul",
+    ),
 }
 
 

@@ -126,6 +126,9 @@ class MarketScanner:
         "toronto": [r"toronto"],
         "seattle": [r"seattle"],
         "atlanta": [r"atlanta"],
+        "chicago": [r"chicago"],
+        "miami": [r"miami"],
+        "ankara": [r"ankara"],
     }
 
     DATE_PATTERN = re.compile(
@@ -188,7 +191,17 @@ class MarketScanner:
 
                 data = await response.json()
 
-                for market_data in data:
+                # Handle different response formats
+                market_list = data if isinstance(data, list) else data.get("markets", data.get("data", []))
+
+                logger.info("Total markets to process", count=len(market_list) if isinstance(market_list, list) else 0)
+
+                for market_data in market_list:
+                    # Skip if not a dict
+                    if not isinstance(market_data, dict):
+                        logger.warning("Failed to parse market: expected dict", type=type(market_data).__name__)
+                        continue
+
                     market = self._parse_market(market_data)
                     if market and market.city:
                         markets.append(market)
