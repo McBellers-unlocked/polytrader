@@ -109,22 +109,20 @@ async def debug_api():
                     if isinstance(item, dict):
                         print(f"  - {item.get('title', 'N/A')[:70]}")
 
-        # Test 2: Try the EXACT slug format from working URL
-        print(f"\n[TEST 2] Try exact slug formats from polymarket.com")
+        # Test 2: Try the EXACT slug format - NOTE: /events/slug/{slug} NOT /events/{slug}
+        print(f"\n[TEST 2] Try /events/slug/{{slug}} format (correct API path)")
         slugs_to_try = [
-            # From user's URL: https://polymarket.com/event/highest-temperature-in-chicago-on-january-24
             "highest-temperature-in-chicago-on-january-24",
             "highest-temperature-in-london-on-january-24",
             "highest-temperature-in-atlanta-on-january-24",
             "highest-temperature-in-seoul-on-january-24",
             "highest-temperature-in-miami-on-january-24",
-            "highest-temperature-in-new-york-city-on-january-24",
-            "highest-temperature-in-nyc-on-january-24",
         ]
 
         found_any = False
         for slug in slugs_to_try:
-            url = f"{GAMMA_EVENTS_URL}/{slug}"
+            # CORRECT: /events/slug/{slug}
+            url = f"{GAMMA_EVENTS_URL}/slug/{slug}"
             async with session.get(url, timeout=30) as response:
                 status = response.status
                 print(f"  {status}: {slug}")
