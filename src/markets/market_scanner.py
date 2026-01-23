@@ -562,8 +562,30 @@ class MarketScanner:
                 elif isinstance(outcome_prices, list) and len(outcome_prices) > 0:
                     yes_price = float(outcome_prices[0])
 
+            # Parse token ID - clobTokenIds may be a JSON array string
+            token_id = ""
+            clob_token_ids = sub_market.get("clobTokenIds", "")
+            if clob_token_ids:
+                if isinstance(clob_token_ids, str):
+                    # Try to parse as JSON array
+                    if clob_token_ids.startswith("["):
+                        try:
+                            ids = json.loads(clob_token_ids)
+                            if isinstance(ids, list) and len(ids) > 0:
+                                token_id = str(ids[0])  # Use first token (YES token)
+                        except json.JSONDecodeError:
+                            token_id = clob_token_ids
+                    else:
+                        token_id = clob_token_ids
+                elif isinstance(clob_token_ids, list) and len(clob_token_ids) > 0:
+                    token_id = str(clob_token_ids[0])
+
+            # Fallback to conditionId if no token_id
+            if not token_id:
+                token_id = sub_market.get("conditionId", "")
+
             bucket = TemperatureBucket(
-                token_id=sub_market.get("clobTokenIds", sub_market.get("conditionId", "")),
+                token_id=token_id,
                 outcome_id=sub_market.get("conditionId", ""),
                 outcome=outcome_str,
                 yes_price=yes_price,

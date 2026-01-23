@@ -154,7 +154,7 @@ class Settings(BaseSettings):
 
     # Edge thresholds
     min_edge_threshold: float = Field(default=0.10, ge=0, le=1)
-    min_model_agreement: float = Field(default=0.65, ge=0, le=1)
+    min_model_agreement: float = Field(default=0.50, ge=0, le=1)  # Lowered from 0.65 for weather markets
 
     # Order execution
     order_timeout_seconds: int = Field(default=60, ge=1)
