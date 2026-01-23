@@ -14,51 +14,79 @@ async def debug_api():
     print("=" * 60)
 
     async with aiohttp.ClientSession() as session:
-        # Fetch with weather tag
+        # Test 1: Fetch with weather tag
         params = {
             "active": "true",
             "closed": "false",
             "tag": "weather",
-            "limit": 10,  # Just get 10 for debugging
+            "limit": 10,
         }
 
-        print(f"\nFetching from: {GAMMA_API_URL}")
+        print(f"\n[TEST 1] Fetch with tag='weather'")
+        print(f"URL: {GAMMA_API_URL}")
         print(f"Params: {params}")
 
         async with session.get(GAMMA_API_URL, params=params, timeout=30) as response:
-            print(f"\nStatus: {response.status}")
-            print(f"Content-Type: {response.headers.get('content-type')}")
-
+            print(f"Status: {response.status}")
             data = await response.json()
+            print(f"Response type: {type(data).__name__}, Length: {len(data) if isinstance(data, list) else 'N/A'}")
 
-            print(f"\nResponse type: {type(data).__name__}")
+            # Count types
+            if isinstance(data, list):
+                type_counts = {}
+                for item in data:
+                    t = type(item).__name__
+                    type_counts[t] = type_counts.get(t, 0) + 1
+                print(f"Item types: {type_counts}")
+
+        # Test 2: Fetch WITHOUT tag (this is where most markets come from)
+        params2 = {
+            "active": "true",
+            "closed": "false",
+            "limit": 100,
+        }
+
+        print(f"\n[TEST 2] Fetch WITHOUT tag (limit=100)")
+        print(f"Params: {params2}")
+
+        async with session.get(GAMMA_API_URL, params=params2, timeout=30) as response:
+            print(f"Status: {response.status}")
+            data = await response.json()
+            print(f"Response type: {type(data).__name__}, Length: {len(data) if isinstance(data, list) else 'N/A'}")
 
             if isinstance(data, list):
-                print(f"List length: {len(data)}")
-                print("\nFirst 5 items:")
-                for i, item in enumerate(data[:5]):
-                    print(f"\n  [{i}] Type: {type(item).__name__}")
+                type_counts = {}
+                str_samples = []
+                for item in data:
+                    t = type(item).__name__
+                    type_counts[t] = type_counts.get(t, 0) + 1
+                    if isinstance(item, str) and len(str_samples) < 3:
+                        str_samples.append(item[:80])
+                print(f"Item types: {type_counts}")
+                if str_samples:
+                    print(f"String samples: {str_samples}")
+
+        # Test 3: Search for actual temperature markets
+        print(f"\n[TEST 3] Search for 'temperature' in questions")
+        params3 = {
+            "active": "true",
+            "closed": "false",
+            "limit": 200,
+        }
+
+        async with session.get(GAMMA_API_URL, params=params3, timeout=30) as response:
+            data = await response.json()
+            temp_markets = []
+            if isinstance(data, list):
+                for item in data:
                     if isinstance(item, dict):
-                        print(f"      Keys: {list(item.keys())[:10]}...")
-                        if "question" in item:
-                            print(f"      Question: {item.get('question', '')[:60]}...")
-                        if "conditionId" in item:
-                            print(f"      conditionId: {item.get('conditionId', '')[:30]}...")
-                    elif isinstance(item, str):
-                        print(f"      Value: {item[:100]}...")
-                    else:
-                        print(f"      Value: {str(item)[:100]}...")
-            elif isinstance(data, dict):
-                print(f"Dict keys: {list(data.keys())}")
-                # Check if markets are nested
-                for key in ["markets", "data", "results"]:
-                    if key in data:
-                        print(f"\nFound '{key}' key with {len(data[key])} items")
-                        if data[key]:
-                            print(f"First item type: {type(data[key][0]).__name__}")
-            else:
-                print(f"Unexpected response type: {type(data)}")
-                print(f"Raw: {str(data)[:500]}")
+                        q = item.get("question", "").lower()
+                        if "temperature" in q or "temp" in q or "degrees" in q:
+                            temp_markets.append(item.get("question", "")[:70])
+
+            print(f"Found {len(temp_markets)} temperature-related markets:")
+            for m in temp_markets[:5]:
+                print(f"  - {m}...")
 
     print("\n" + "=" * 60)
     print("Debug complete")
