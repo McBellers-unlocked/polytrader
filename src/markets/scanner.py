@@ -21,7 +21,7 @@ class TemperatureBucket:
     Each bucket represents a range like "68-69°F" with YES/NO tokens.
     """
 
-    token_id: str
+    token_id: str  # YES token ID
     outcome: str  # e.g., "68-69°F" or "≥75°F" or "<60°F"
     low_bound: float | None  # Lower bound (inclusive), None for unbounded
     high_bound: float | None  # Upper bound (exclusive), None for unbounded
@@ -32,6 +32,8 @@ class TemperatureBucket:
     no_bid: float  # Best bid for NO
     no_ask: float  # Best ask for NO
     volume_24h: float = 0.0  # 24h trading volume
+    no_token_id: str = ""  # NO token ID (for neg-risk markets)
+    unit: str = "F"  # Temperature unit (F or C)
 
     @property
     def spread(self) -> float:
@@ -309,7 +311,8 @@ class MarketScanner:
                 end_date = datetime.utcnow()
 
             # Parse buckets from outcomes
-            buckets = self._parse_buckets(data.get("tokens", []))
+            city_unit = city.unit if city else "F"
+            buckets = self._parse_buckets(data.get("tokens", []), city_unit)
 
             market = WeatherMarket(
                 condition_id=data.get("conditionId", data.get("condition_id", "")),
@@ -371,6 +374,7 @@ class MarketScanner:
     def _parse_buckets(
         self,
         tokens: list[dict[str, Any]],
+        city_unit: str = "F",
     ) -> list[TemperatureBucket]:
         """Parse temperature buckets from token data."""
         buckets: list[TemperatureBucket] = []
@@ -378,6 +382,25 @@ class MarketScanner:
         for token in tokens:
             outcome = token.get("outcome", "")
             token_id = token.get("token_id", "")
+
+            # Try to get NO token ID from clobTokenIds if available
+            # clobTokenIds is typically [YES_token_id, NO_token_id]
+            clob_token_ids = token.get("clobTokenIds", [])
+            if isinstance(clob_token_ids, str):
+                try:
+                    import json
+                    clob_token_ids = json.loads(clob_token_ids)
+                except json.JSONDecodeError:
+                    clob_token_ids = []
+
+            # If we have both tokens, the second is the NO token
+            no_token_id = ""
+            if len(clob_token_ids) >= 2:
+                # First is YES, second is NO
+                if clob_token_ids[0] == token_id:
+                    no_token_id = clob_token_ids[1]
+                else:
+                    no_token_id = clob_token_ids[0]
 
             # Parse bounds from outcome string
             low_bound, high_bound = self._parse_bounds(outcome)
@@ -397,6 +420,8 @@ class MarketScanner:
                 no_bid=(1 - yes_price) * 0.98,
                 no_ask=(1 - yes_price) * 1.02,
                 volume_24h=float(token.get("volume", 0) or 0),
+                no_token_id=no_token_id,
+                unit=city_unit,
             )
 
             buckets.append(bucket)

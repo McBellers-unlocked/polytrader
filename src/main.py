@@ -95,6 +95,10 @@ class TradingOpportunity:
     # Nowcasting (if applicable)
     metar_constraint: TemperatureConstraint | None = None
 
+    # BUY NO support (when SELL is converted to BUY NO)
+    is_buy_no: bool = False
+    effective_token_id: str = ""  # Token to actually trade (YES or NO)
+
     @property
     def priority_score(self) -> float:
         """Score for sorting opportunities."""
@@ -426,21 +430,39 @@ class TradingBot:
         # Update daily stats
         self._daily_stats["opportunities"] += len(all_opportunities)
 
-        # 5. Filter opportunities based on what's actually tradeable
-        # For now, only BUY opportunities are feasible without existing positions
-        # TODO: Track positions and allow SELL when we own tokens
-        tradeable_opportunities = [
-            opp for opp in all_opportunities
-            if opp.side == "BUY"
-        ]
+        # 5. Filter and convert opportunities to tradeable orders
+        # - BUY opportunities: trade directly (BUY YES)
+        # - SELL opportunities: convert to BUY NO (if no_token_id available)
+        tradeable_opportunities: list[TradingOpportunity] = []
+        n_sells_converted = 0
+        n_sells_skipped = 0
 
-        # Log if we filtered out SELL opportunities
-        n_sells_filtered = len(all_opportunities) - len(tradeable_opportunities)
-        if n_sells_filtered > 0:
+        for opp in all_opportunities:
+            if opp.side == "BUY":
+                # BUY YES - use the YES token
+                opp.effective_token_id = opp.bucket.token_id
+                opp.is_buy_no = False
+                tradeable_opportunities.append(opp)
+            elif opp.side == "SELL":
+                # SELL YES opportunity - convert to BUY NO
+                if opp.bucket.no_token_id:
+                    # Convert: SELL YES at price P -> BUY NO at price (1-P)
+                    # The edge is the same magnitude but we're buying underpriced NO
+                    opp.side = "BUY"
+                    opp.price = Decimal(str(opp.bucket.no_price))
+                    opp.effective_token_id = opp.bucket.no_token_id
+                    opp.is_buy_no = True
+                    tradeable_opportunities.append(opp)
+                    n_sells_converted += 1
+                else:
+                    # No NO token available, skip
+                    n_sells_skipped += 1
+
+        if n_sells_converted > 0 or n_sells_skipped > 0:
             logger.info(
-                "Filtered SELL opportunities (no positions to sell)",
-                n_filtered=n_sells_filtered,
-                n_remaining=len(tradeable_opportunities),
+                "Processed SELL opportunities",
+                converted_to_buy_no=n_sells_converted,
+                skipped_no_token=n_sells_skipped,
             )
 
         # Sort by expected profit
@@ -1053,10 +1075,14 @@ class TradingBot:
             )
             return False
 
+        # Determine the token to trade (YES token or NO token)
+        token_to_trade = opp.effective_token_id or opp.bucket.token_id
+        trade_type = "BUY_NO" if opp.is_buy_no else "BUY_YES"
+
         logger.info(
             "[AUTO] Executing trade",
             outcome=opp.bucket.outcome,
-            side=opp.side,
+            trade_type=trade_type,
             price=str(opp.price),
             size_dollars=str(opp.suggested_size),
             size_shares=str(shares),
@@ -1065,7 +1091,7 @@ class TradingBot:
         # Execute the order via Polymarket client
         order_side = OrderSide.BUY if opp.side == "BUY" else OrderSide.SELL
         result = await self.poly_client.place_order(
-            token_id=opp.bucket.token_id,
+            token_id=token_to_trade,
             side=order_side,
             price=opp.price,
             size=shares,
@@ -1076,7 +1102,7 @@ class TradingBot:
                 "[AUTO] Trade executed",
                 city=opp.market.city.name if opp.market.city else "unknown",
                 outcome=opp.bucket.outcome,
-                side=opp.side,
+                trade_type=trade_type,
                 price=str(opp.price),
                 size=str(opp.suggested_size),
                 edge=opp.edge,
