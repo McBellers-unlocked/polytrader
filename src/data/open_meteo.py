@@ -22,8 +22,10 @@ from src.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Open-Meteo Ensemble API endpoint
-ENSEMBLE_API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+# Open-Meteo Ensemble API endpoints
+# Free tier uses ensemble-api, paid plans use customer-api
+ENSEMBLE_API_URL_FREE = "https://ensemble-api.open-meteo.com/v1/ensemble"
+ENSEMBLE_API_URL_PAID = "https://customer-api.open-meteo.com/v1/ensemble"
 
 # Models to query - each provides multiple ensemble members
 ENSEMBLE_MODELS = [
@@ -292,12 +294,15 @@ class OpenMeteoClient:
             "timezone": "UTC",
         }
 
-        # Add API key for paid Open-Meteo plans
+        # Use paid API URL and add key if configured
         if self.settings.open_meteo_api_key:
+            api_url = ENSEMBLE_API_URL_PAID
             params["apikey"] = self.settings.open_meteo_api_key
+        else:
+            api_url = ENSEMBLE_API_URL_FREE
 
         async with self._session.get(
-            ENSEMBLE_API_URL,
+            api_url,
             params=params,
             timeout=aiohttp.ClientTimeout(total=30),
         ) as response:
