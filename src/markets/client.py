@@ -269,18 +269,24 @@ class PolymarketClient:
             return []
 
         try:
-            # Get the wallet address
-            address = clob.get_address()
+            # Use the funder address (proxy wallet) - this is where positions are held
+            # The signer address from get_address() is different from where positions live
+            address = self.settings.polymarket_funder
+            if not address:
+                address = clob.get_address()
 
             # Query the Polymarket data API for positions
             session = await self._get_session()
             url = f"https://data-api.polymarket.com/positions?user={address}"
+
+            logger.debug("Fetching positions", url=url, address=address)
 
             async with session.get(url, timeout=30) as response:
                 if response.status != 200:
                     logger.warning(
                         "Failed to fetch positions from data API",
                         status=response.status,
+                        address=address,
                     )
                     return []
 
@@ -288,6 +294,7 @@ class PolymarketClient:
                 logger.info(
                     "Fetched positions from Polymarket",
                     count=len(positions) if positions else 0,
+                    address=address[:10] + "..." if address else "none",
                 )
                 return positions if positions else []
 
