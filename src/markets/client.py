@@ -71,22 +71,25 @@ class PolymarketClient:
         if self._clob_client is None and self.settings.is_live_trading:
             try:
                 from py_clob_client.client import ClobClient
-                from py_clob_client.clob_types import ApiCreds
 
-                # Initialize with credentials
+                # Initialize client - it will derive API credentials from private key
                 self._clob_client = ClobClient(
                     host=self.settings.polymarket_clob_url,
                     chain_id=137,  # Polygon
                     key=self.settings.polymarket_private_key,
-                    creds=ApiCreds(
-                        api_key=self.settings.polymarket_api_key,
-                        api_secret="",
-                        api_passphrase="",
-                    ) if self.settings.polymarket_api_key else None,
                     funder=self.settings.polymarket_funder,
                 )
+
+                # Derive and set API credentials from private key
+                self._clob_client.set_api_creds(self._clob_client.derive_api_key())
+
+                logger.info("CLOB client initialized with derived API credentials")
+
             except ImportError:
                 logger.warning("py-clob-client not installed, using paper trading")
+                self._clob_client = None
+            except Exception as e:
+                logger.error(f"Failed to initialize CLOB client: {e}")
                 self._clob_client = None
 
         return self._clob_client
