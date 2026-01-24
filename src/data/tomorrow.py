@@ -11,8 +11,9 @@ from src.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Cache TTL in seconds - refresh Tomorrow.io data every 120s to conserve API calls
-CACHE_TTL_SECONDS = 120
+# Cache TTL in seconds - refresh Tomorrow.io data every 180s to stay within free tier (500/day)
+# 16 markets × (86400s / 180s) = ~480 calls/day
+CACHE_TTL_SECONDS = 180
 
 
 @dataclass
@@ -49,8 +50,7 @@ class TomorrowClient:
     """
     Client for Tomorrow.io API with caching.
 
-    Caches forecasts for 120 seconds to conserve API calls.
-    Free tier: 500/day, paid tiers available for more.
+    Caches forecasts for 180 seconds to stay within free tier (500 calls/day).
     """
 
     def __init__(self, session: aiohttp.ClientSession | None = None):
@@ -112,7 +112,7 @@ class TomorrowClient:
         """
         Fetch forecast from Tomorrow.io with caching.
 
-        Caches forecasts for 120s to conserve API calls.
+        Caches forecasts for 180s to stay within free tier.
 
         Args:
             city: City configuration
