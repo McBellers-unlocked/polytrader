@@ -258,6 +258,7 @@ class TradingBot:
                 return
 
             loaded_count = 0
+            skipped_dust = 0
             for pos in positions:
                 # Extract position data from Polymarket data API response
                 # Data API format: asset (token_id), size, avgPrice, currentValue, etc.
@@ -275,11 +276,20 @@ class TradingBot:
                 except (ValueError, TypeError):
                     size_float = 0
 
-                if token_id and size_float > 0:
-                    # Create a Position object for the risk manager
-                    avg_price = pos.get("avgPrice", 0) or pos.get("avg_price", 0) or pos.get("averagePrice", 0) or 0
-                    cur_price = pos.get("price", 0) or pos.get("currentPrice", 0) or pos.get("curPrice", 0) or avg_price
+                # Get price to calculate position value
+                avg_price = pos.get("avgPrice", 0) or pos.get("avg_price", 0) or pos.get("averagePrice", 0) or 0
+                cur_price = pos.get("price", 0) or pos.get("currentPrice", 0) or pos.get("curPrice", 0) or avg_price
+                try:
+                    price_float = float(cur_price) if cur_price else 0
+                except (ValueError, TypeError):
+                    price_float = 0
 
+                # Calculate position value - skip dust positions (< $1)
+                position_value = size_float * price_float
+                MIN_POSITION_VALUE = 1.0  # Ignore positions worth less than $1
+
+                if token_id and size_float > 0 and position_value >= MIN_POSITION_VALUE:
+                    # Create a Position object for the risk manager
                     position = Position(
                         token_id=str(token_id),
                         condition_id=pos.get("condition_id", "") or pos.get("conditionId", "") or pos.get("marketId", "") or "",
@@ -299,10 +309,19 @@ class TradingBot:
                         size=size_float,
                         outcome=position.outcome,
                     )
+                elif token_id and size_float > 0 and position_value < MIN_POSITION_VALUE:
+                    # Dust position - skip but count it
+                    skipped_dust += 1
+                    logger.debug(
+                        "Skipped dust position",
+                        token_id=token_id[:20] + "...",
+                        value=round(position_value, 4),
+                    )
 
             logger.info(
                 "Loaded existing positions from Polymarket",
                 position_count=loaded_count,
+                skipped_dust=skipped_dust,
                 token_ids=[p[:16] + "..." for p in list(self.risk_manager._positions.keys())[:5]],
             )
 
