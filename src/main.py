@@ -445,12 +445,15 @@ class TradingBot:
                 tradeable_opportunities.append(opp)
             elif opp.side == "SELL":
                 # SELL YES opportunity - convert to BUY NO
-                if opp.bucket.no_token_id:
+                # Use getattr for backwards compatibility
+                no_token_id = getattr(opp.bucket, 'no_token_id', '')
+                no_price = getattr(opp.bucket, 'no_price', 1 - opp.bucket.yes_price)
+                if no_token_id:
                     # Convert: SELL YES at price P -> BUY NO at price (1-P)
                     # The edge is the same magnitude but we're buying underpriced NO
                     opp.side = "BUY"
-                    opp.price = Decimal(str(opp.bucket.no_price))
-                    opp.effective_token_id = opp.bucket.no_token_id
+                    opp.price = Decimal(str(no_price))
+                    opp.effective_token_id = no_token_id
                     opp.is_buy_no = True
                     tradeable_opportunities.append(opp)
                     n_sells_converted += 1
