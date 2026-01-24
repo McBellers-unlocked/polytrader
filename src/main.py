@@ -735,14 +735,13 @@ class TradingBot:
                     convert_to_fahrenheit=(city.unit == "F"),
                 )
         except Exception as e:
-            logger.warning(f"Forecast fetch failed, using mock: {e}")
-            return create_mock_forecast(
-                lat=city.lat,
-                lon=city.lon,
-                city_name=city.name,
-                target_date=target_date,
-                convert_to_fahrenheit=(city.unit == "F"),
+            # CRITICAL: Do NOT fall back to mock data for real trading
+            # Mock data generates random temps (~55°F for all cities) which
+            # creates false edges. Skip this market instead.
+            logger.error(
+                f"Forecast fetch failed - SKIPPING MARKET (not using mock data): {e}"
             )
+            return None
 
     async def _execute_opportunity(
         self,

@@ -174,7 +174,7 @@ class RiskManager:
     MAX_DRAWDOWN_PCT = 0.20  # 20% drawdown → emergency stop
     MIN_EDGE = 0.10  # 10% minimum edge
     MIN_MODEL_AGREEMENT = 0.65  # 65% model agreement
-    MIN_LIQUIDITY = 500.0  # $500 minimum liquidity
+    MIN_LIQUIDITY = 10.0  # $10 minimum liquidity (weather markets have lower liquidity)
 
     def __init__(
         self,
