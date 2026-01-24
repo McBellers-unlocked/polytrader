@@ -240,6 +240,54 @@ class TradingBot:
             "metar_trades": 0,
         }
 
+    async def _load_existing_positions(self) -> None:
+        """Load existing positions from Polymarket to prevent duplicate trades."""
+        if self.mode == TradingMode.PAPER:
+            logger.info("Paper trading mode - skipping position load")
+            return
+
+        try:
+            positions = await self.poly_client.get_positions()
+
+            if not positions:
+                logger.info("No existing positions found on Polymarket")
+                return
+
+            loaded_count = 0
+            for pos in positions:
+                # Extract position data from Polymarket API response
+                # The response format may vary, so we handle different formats
+                token_id = pos.get("asset", "") or pos.get("token_id", "") or pos.get("tokenId", "")
+                size = pos.get("size", 0) or pos.get("balance", 0)
+
+                if token_id and float(size) > 0:
+                    # Create a Position object for the risk manager
+                    position = Position(
+                        token_id=str(token_id),
+                        condition_id=pos.get("condition_id", "") or pos.get("conditionId", "") or "",
+                        outcome=pos.get("outcome", "") or pos.get("title", "") or "unknown",
+                        city="unknown",  # We don't have city info from API
+                        target_date=None,
+                        size=Decimal(str(size)),
+                        entry_price=Decimal(str(pos.get("avgPrice", 0) or pos.get("avg_price", 0) or 0)),
+                        current_price=Decimal(str(pos.get("price", 0) or pos.get("currentPrice", 0) or 0)),
+                        opened_at=datetime.utcnow(),
+                    )
+                    self.risk_manager._positions[token_id] = position
+                    loaded_count += 1
+
+            logger.info(
+                "Loaded existing positions from Polymarket",
+                position_count=loaded_count,
+                token_ids=[p[:16] + "..." for p in list(self.risk_manager._positions.keys())[:5]],
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to load existing positions - will skip duplicate check for prior positions",
+                error=str(e),
+            )
+
     async def start(self) -> None:
         """Start the trading bot."""
         logger.info(
@@ -257,6 +305,9 @@ class TradingBot:
 
         # Connect to data store
         await self.datastore.connect()
+
+        # Load existing positions from Polymarket to prevent duplicate trades
+        await self._load_existing_positions()
 
         # Start METAR nowcaster (background updates every 15 min)
         if not self.use_mock:
