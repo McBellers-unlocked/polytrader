@@ -121,13 +121,18 @@ class PolymarketClient:
             return self._simulate_order(token_id, side, price, size)
 
         try:
-            # Build and sign the order
-            order = clob.create_order(
+            from py_clob_client.clob_types import OrderArgs, OrderType as ClobOrderType
+
+            # Build order args for py-clob-client
+            order_args = OrderArgs(
                 token_id=token_id,
                 price=float(price),
                 size=float(size),
                 side=side.value,
             )
+
+            # Create and sign the order
+            order = clob.create_order(order_args)
 
             # Submit the order
             response = clob.post_order(order)
