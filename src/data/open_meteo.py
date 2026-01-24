@@ -23,9 +23,9 @@ from src.logging import get_logger
 logger = get_logger(__name__)
 
 # Open-Meteo Ensemble API endpoints
-# Free tier uses ensemble-api, paid plans use customer-api
+# Free tier uses ensemble-api, paid plans use customer-ensemble-api
 ENSEMBLE_API_URL_FREE = "https://ensemble-api.open-meteo.com/v1/ensemble"
-ENSEMBLE_API_URL_PAID = "https://customer-api.open-meteo.com/v1/ensemble"
+ENSEMBLE_API_URL_PAID = "https://customer-ensemble-api.open-meteo.com/v1/ensemble"
 
 # Models to query - each provides multiple ensemble members
 ENSEMBLE_MODELS = [
