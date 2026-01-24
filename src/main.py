@@ -255,26 +255,46 @@ class TradingBot:
 
             loaded_count = 0
             for pos in positions:
-                # Extract position data from Polymarket API response
-                # The response format may vary, so we handle different formats
-                token_id = pos.get("asset", "") or pos.get("token_id", "") or pos.get("tokenId", "")
-                size = pos.get("size", 0) or pos.get("balance", 0)
+                # Extract position data from Polymarket data API response
+                # Data API format: asset (token_id), size, avgPrice, currentValue, etc.
+                token_id = (
+                    pos.get("asset", "") or
+                    pos.get("token_id", "") or
+                    pos.get("tokenId", "") or
+                    pos.get("token", "")
+                )
+                size = pos.get("size", 0) or pos.get("balance", 0) or pos.get("amount", 0)
 
-                if token_id and float(size) > 0:
+                # Skip zero or negative positions
+                try:
+                    size_float = float(size) if size else 0
+                except (ValueError, TypeError):
+                    size_float = 0
+
+                if token_id and size_float > 0:
                     # Create a Position object for the risk manager
+                    avg_price = pos.get("avgPrice", 0) or pos.get("avg_price", 0) or pos.get("averagePrice", 0) or 0
+                    cur_price = pos.get("price", 0) or pos.get("currentPrice", 0) or pos.get("curPrice", 0) or avg_price
+
                     position = Position(
                         token_id=str(token_id),
-                        condition_id=pos.get("condition_id", "") or pos.get("conditionId", "") or "",
-                        outcome=pos.get("outcome", "") or pos.get("title", "") or "unknown",
+                        condition_id=pos.get("condition_id", "") or pos.get("conditionId", "") or pos.get("marketId", "") or "",
+                        outcome=pos.get("outcome", "") or pos.get("title", "") or pos.get("name", "") or "unknown",
                         city="unknown",  # We don't have city info from API
                         target_date=None,
-                        size=Decimal(str(size)),
-                        entry_price=Decimal(str(pos.get("avgPrice", 0) or pos.get("avg_price", 0) or 0)),
-                        current_price=Decimal(str(pos.get("price", 0) or pos.get("currentPrice", 0) or 0)),
+                        size=Decimal(str(size_float)),
+                        entry_price=Decimal(str(avg_price)),
+                        current_price=Decimal(str(cur_price)),
                         opened_at=datetime.utcnow(),
                     )
                     self.risk_manager._positions[token_id] = position
                     loaded_count += 1
+                    logger.debug(
+                        "Loaded position",
+                        token_id=token_id[:20] + "...",
+                        size=size_float,
+                        outcome=position.outcome,
+                    )
 
             logger.info(
                 "Loaded existing positions from Polymarket",
