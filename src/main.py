@@ -948,10 +948,33 @@ class TradingBot:
         if not self.tomorrow_client.is_available:
             return
 
+        # Maximum disagreement threshold (in forecast units)
+        # If Tomorrow.io differs by more than this, skip blending
+        MAX_DISAGREEMENT_F = 5.0  # 5°F for Fahrenheit cities
+        MAX_DISAGREEMENT_C = 3.0  # ~3°C for Celsius cities
+
         try:
             tomorrow = await self.tomorrow_client.get_forecast(city, target_date)
 
             if tomorrow is None:
+                return
+
+            # Check if Tomorrow.io strongly disagrees with ensemble
+            disagreement = abs(tomorrow.high_temp - forecast.mean)
+            max_disagreement = MAX_DISAGREEMENT_F if city.unit == "F" else MAX_DISAGREEMENT_C
+
+            if disagreement > max_disagreement:
+                # Don't blend - the disagreement is too large
+                # One source is likely wrong, don't let single ML forecast override 71 members
+                logger.warning(
+                    "Tomorrow.io strongly disagrees with ensemble - skipping blend",
+                    city=city.name,
+                    target_date=str(target_date),
+                    tomorrow_high=tomorrow.high_temp,
+                    ensemble_mean=forecast.mean,
+                    disagreement=disagreement,
+                    max_allowed=max_disagreement,
+                )
                 return
 
             # Add Tomorrow.io as synthetic ensemble members with tight spread
@@ -982,6 +1005,8 @@ class TradingBot:
                 city=city.name,
                 target_date=str(target_date),
                 tomorrow_high=tomorrow.high_temp,
+                ensemble_mean=round(forecast.mean, 1),
+                disagreement=round(disagreement, 1),
                 original_members=len(original_temps),
                 blended_members=len(forecast.temperatures),
                 blended_mean=forecast.mean,
