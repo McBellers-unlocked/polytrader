@@ -33,6 +33,7 @@ from src.data.nowcasting import (
     TemperatureConstraint,
     create_mock_constraint,
 )
+from src.data.tomorrow import TomorrowClient, TomorrowForecast
 
 # Market scanning
 from src.markets.market_scanner import (
@@ -218,6 +219,9 @@ class TradingBot:
 
         # METAR nowcasting for real-time constraints
         self.nowcaster = MetarNowcaster()
+
+        # Tomorrow.io client for ML-enhanced forecasts (with caching)
+        self.tomorrow_client = TomorrowClient()
 
         # Polymarket client for order execution
         self.poly_client = PolymarketClient()
@@ -896,7 +900,7 @@ class TradingBot:
         city: CityConfig,
         target_date: date,
     ) -> EnsembleForecastResult | None:
-        """Get ensemble forecast for a city and date."""
+        """Get ensemble forecast for a city and date, enhanced with Tomorrow.io."""
         if self.use_mock:
             return create_mock_forecast(
                 lat=city.lat,
@@ -907,14 +911,24 @@ class TradingBot:
             )
 
         try:
+            # Fetch Open-Meteo ensemble forecast (primary source)
             async with OpenMeteoClient() as client:
-                return await client.get_ensemble_forecast(
+                forecast = await client.get_ensemble_forecast(
                     lat=city.lat,
                     lon=city.lon,
                     target_date=target_date,
                     city_name=city.name,
                     convert_to_fahrenheit=(city.unit == "F"),
                 )
+
+            if forecast is None:
+                return None
+
+            # Try to enhance with Tomorrow.io (optional, cached)
+            await self._enhance_with_tomorrow(forecast, city, target_date)
+
+            return forecast
+
         except Exception as e:
             # CRITICAL: Do NOT fall back to mock data for real trading
             # Mock data generates random temps (~55°F for all cities) which
@@ -923,6 +937,64 @@ class TradingBot:
                 f"Forecast fetch failed - SKIPPING MARKET (not using mock data): {e}"
             )
             return None
+
+    async def _enhance_with_tomorrow(
+        self,
+        forecast: EnsembleForecastResult,
+        city: CityConfig,
+        target_date: date,
+    ) -> None:
+        """Enhance ensemble forecast with Tomorrow.io ML forecast."""
+        if not self.tomorrow_client.is_available:
+            return
+
+        try:
+            tomorrow = await self.tomorrow_client.get_forecast(city, target_date)
+
+            if tomorrow is None:
+                return
+
+            # Add Tomorrow.io as synthetic ensemble members with tight spread
+            # Tomorrow.io is ML-enhanced, so use smaller std dev (~2°F)
+            tomorrow_samples = np.random.normal(
+                tomorrow.high_temp,
+                2.0,  # Tighter spread than raw NWP models
+                20,   # Add 20 synthetic members
+            )
+
+            # Blend into existing ensemble
+            original_temps = forecast.temperatures
+            forecast.temperatures = np.concatenate([original_temps, tomorrow_samples])
+
+            # Recalculate statistics with blended data
+            forecast.mean = float(np.mean(forecast.temperatures))
+            forecast.std = float(np.std(forecast.temperatures))
+            forecast.min = float(np.min(forecast.temperatures))
+            forecast.max = float(np.max(forecast.temperatures))
+            forecast.p10 = float(np.percentile(forecast.temperatures, 10))
+            forecast.p25 = float(np.percentile(forecast.temperatures, 25))
+            forecast.p50 = float(np.percentile(forecast.temperatures, 50))
+            forecast.p75 = float(np.percentile(forecast.temperatures, 75))
+            forecast.p90 = float(np.percentile(forecast.temperatures, 90))
+
+            logger.info(
+                "Enhanced forecast with Tomorrow.io",
+                city=city.name,
+                target_date=str(target_date),
+                tomorrow_high=tomorrow.high_temp,
+                original_members=len(original_temps),
+                blended_members=len(forecast.temperatures),
+                blended_mean=forecast.mean,
+                blended_std=forecast.std,
+            )
+
+        except Exception as e:
+            # Tomorrow.io enhancement is optional - don't fail the whole forecast
+            logger.warning(
+                "Failed to enhance forecast with Tomorrow.io",
+                city=city.name,
+                error=str(e),
+            )
 
     async def _execute_opportunity(
         self,
