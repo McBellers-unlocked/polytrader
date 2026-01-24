@@ -1128,6 +1128,21 @@ class TradingBot:
                 edge=opp.edge,
                 order_id=result.order_id,
             )
+
+            # Record the position so we don't repeat the same trade
+            position = Position(
+                token_id=token_to_trade,
+                condition_id=opp.market.condition_id,
+                outcome=opp.bucket.outcome,
+                city=opp.market.city.name if opp.market.city else "unknown",
+                target_date=opp.market.target_date,
+                size=shares,
+                entry_price=opp.price,
+                current_price=opp.price,
+                opened_at=datetime.utcnow(),
+            )
+            self.risk_manager.record_trade_open(position)
+
             return True
         else:
             logger.error(
