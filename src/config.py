@@ -38,100 +38,101 @@ class CityConfig:
         return f"CityConfig({self.name}, {self.lat}, {self.lon}, {self.metar}, {self.unit})"
 
 
-# Predefined city configurations
+# Predefined city configurations - coordinates match airport/METAR station locations
+# since Polymarket markets resolve based on airport temperatures
 CITIES: dict[str, CityConfig] = {
     "nyc": CityConfig(
         name="New York City",
-        lat=40.71,
-        lon=-74.01,
-        metar="KNYC",
+        lat=40.7769,  # LaGuardia Airport
+        lon=-73.8740,
+        metar="KLGA",
         unit="F",
         timezone="America/New_York",
     ),
     "london": CityConfig(
         name="London",
-        lat=51.51,
-        lon=-0.13,
-        metar="EGLL",
+        lat=51.5053,  # London City Airport
+        lon=0.0553,
+        metar="EGLC",
         unit="C",
         timezone="Europe/London",
     ),
     "seoul": CityConfig(
         name="Seoul",
-        lat=37.57,
-        lon=126.98,
+        lat=37.4602,  # Incheon International Airport
+        lon=126.4407,
         metar="RKSI",
         unit="C",
         timezone="Asia/Seoul",
     ),
     "dallas": CityConfig(
         name="Dallas",
-        lat=32.78,
-        lon=-96.80,
+        lat=32.8471,  # Dallas Love Field
+        lon=-96.8518,
         metar="KDAL",
         unit="F",
         timezone="America/Chicago",
     ),
     "toronto": CityConfig(
         name="Toronto",
-        lat=43.65,
-        lon=-79.38,
+        lat=43.6777,  # Toronto Pearson International
+        lon=-79.6248,
         metar="CYYZ",
         unit="C",
         timezone="America/Toronto",
     ),
     "seattle": CityConfig(
         name="Seattle",
-        lat=47.61,
-        lon=-122.33,
+        lat=47.4502,  # Seattle-Tacoma International
+        lon=-122.3088,
         metar="KSEA",
         unit="F",
         timezone="America/Los_Angeles",
     ),
     "atlanta": CityConfig(
         name="Atlanta",
-        lat=33.75,
-        lon=-84.39,
+        lat=33.6407,  # Hartsfield-Jackson International
+        lon=-84.4277,
         metar="KATL",
         unit="F",
         timezone="America/New_York",
     ),
     "chicago": CityConfig(
         name="Chicago",
-        lat=41.88,
-        lon=-87.63,
+        lat=41.9742,  # O'Hare International Airport
+        lon=-87.9073,
         metar="KORD",
         unit="F",
         timezone="America/Chicago",
     ),
     "miami": CityConfig(
         name="Miami",
-        lat=25.76,
-        lon=-80.19,
+        lat=25.7959,  # Miami International Airport
+        lon=-80.2870,
         metar="KMIA",
         unit="F",
         timezone="America/New_York",
     ),
     "ankara": CityConfig(
         name="Ankara",
-        lat=39.93,
-        lon=32.86,
+        lat=40.1281,  # Esenboga International Airport
+        lon=32.9951,
         metar="LTAC",
         unit="C",
         timezone="Europe/Istanbul",
     ),
     "buenos_aires": CityConfig(
         name="Buenos Aires",
-        lat=-34.61,
-        lon=-58.38,
+        lat=-34.8222,  # Ministro Pistarini (Ezeiza)
+        lon=-58.5358,
         metar="SAEZ",
         unit="C",
         timezone="America/Argentina/Buenos_Aires",
     ),
     "wellington": CityConfig(
         name="Wellington",
-        lat=-41.29,
-        lon=174.78,
+        lat=-41.3272,  # Wellington International Airport
+        lon=174.8053,
         metar="NZWN",
         unit="C",
         timezone="Pacific/Auckland",
