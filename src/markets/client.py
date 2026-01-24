@@ -256,10 +256,10 @@ class PolymarketClient:
 
     async def get_positions(self) -> list[dict[str, Any]]:
         """
-        Get current positions.
+        Get current positions from Polymarket data API.
 
         Returns:
-            List of position dicts
+            List of position dicts with 'asset' (token_id) and 'size' fields
         """
         if self.settings.is_paper_trading:
             return []
@@ -269,7 +269,28 @@ class PolymarketClient:
             return []
 
         try:
-            return clob.get_positions()
+            # Get the wallet address
+            address = clob.get_address()
+
+            # Query the Polymarket data API for positions
+            session = await self._get_session()
+            url = f"https://data-api.polymarket.com/positions?user={address}"
+
+            async with session.get(url, timeout=30) as response:
+                if response.status != 200:
+                    logger.warning(
+                        "Failed to fetch positions from data API",
+                        status=response.status,
+                    )
+                    return []
+
+                positions = await response.json()
+                logger.info(
+                    "Fetched positions from Polymarket",
+                    count=len(positions) if positions else 0,
+                )
+                return positions if positions else []
+
         except Exception as e:
             logger.error("Failed to get positions", error=str(e))
             return []
