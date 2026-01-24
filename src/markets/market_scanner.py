@@ -47,12 +47,18 @@ class TemperatureBucket:
     # NO token for BUY NO trades
     no_token_id: str = ""  # NO token ID (for neg-risk markets)
 
-    # Orderbook data
+    # YES token orderbook data
     best_bid: float = 0.0
     best_ask: float = 0.0
     bid_size: float = 0.0
     ask_size: float = 0.0
     spread: float = 0.0
+
+    # NO token orderbook data (actual prices to BUY/SELL NO)
+    no_best_bid: float = 0.0  # Best bid for NO token (price to sell NO)
+    no_best_ask: float = 0.0  # Best ask for NO token (price to BUY NO)
+    no_bid_size: float = 0.0
+    no_ask_size: float = 0.0
 
     # Volume
     volume_24h: float = 0.0
@@ -953,17 +959,17 @@ class MarketScanner:
             bucket.unit = default_unit
 
     async def _fetch_orderbooks(self, markets: list[WeatherMarket]) -> None:
-        """Fetch orderbook data for all market buckets."""
+        """Fetch orderbook data for all market buckets (both YES and NO tokens)."""
         logger.info(f"Fetching orderbooks for {len(markets)} markets")
 
-        # Collect all token IDs
+        # Collect all token IDs (YES tokens)
         token_ids: list[tuple[WeatherMarket, TemperatureBucket]] = []
         for market in markets:
             for bucket in market.buckets:
                 if bucket.token_id:
                     token_ids.append((market, bucket))
 
-        # Fetch in batches
+        # Fetch YES orderbooks in batches
         batch_size = 10
         for i in range(0, len(token_ids), batch_size):
             batch = token_ids[i:i + batch_size]
@@ -979,7 +985,34 @@ class MarketScanner:
                     continue
 
                 if result:
-                    self._apply_orderbook_data(bucket, result)
+                    self._apply_orderbook_data(bucket, result, is_no_token=False)
+
+        # Collect NO token IDs
+        no_token_ids: list[tuple[WeatherMarket, TemperatureBucket]] = []
+        for market in markets:
+            for bucket in market.buckets:
+                if bucket.no_token_id:
+                    no_token_ids.append((market, bucket))
+
+        if no_token_ids:
+            logger.info(f"Fetching NO token orderbooks for {len(no_token_ids)} buckets")
+
+        # Fetch NO orderbooks in batches
+        for i in range(0, len(no_token_ids), batch_size):
+            batch = no_token_ids[i:i + batch_size]
+            tasks = [
+                self._fetch_orderbook(bucket.no_token_id)
+                for _, bucket in batch
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for (market, bucket), result in zip(batch, results):
+                if isinstance(result, Exception):
+                    logger.debug(f"Failed to fetch NO orderbook for {bucket.no_token_id}: {result}")
+                    continue
+
+                if result:
+                    self._apply_orderbook_data(bucket, result, is_no_token=True)
 
     async def _fetch_orderbook(self, token_id: str) -> dict[str, Any] | None:
         """Fetch orderbook for a single token."""
@@ -1003,30 +1036,63 @@ class MarketScanner:
         self,
         bucket: TemperatureBucket,
         orderbook: dict[str, Any],
+        is_no_token: bool = False,
     ) -> None:
-        """Apply orderbook data to a bucket."""
+        """Apply orderbook data to a bucket.
+
+        Args:
+            bucket: The temperature bucket to update
+            orderbook: Orderbook data with bids and asks
+            is_no_token: If True, this is orderbook data for the NO token
+        """
         bids = orderbook.get("bids", [])
         asks = orderbook.get("asks", [])
 
-        if bids:
-            # Best bid is highest price
-            best_bid = max(bids, key=lambda x: float(x.get("price", 0)))
-            bucket.best_bid = float(best_bid.get("price", 0))
-            bucket.bid_size = float(best_bid.get("size", 0))
+        if is_no_token:
+            # Apply to NO token fields
+            if bids:
+                best_bid = max(bids, key=lambda x: float(x.get("price", 0)))
+                bucket.no_best_bid = float(best_bid.get("price", 0))
+                bucket.no_bid_size = float(best_bid.get("size", 0))
 
-        if asks:
-            # Best ask is lowest price
-            best_ask = min(asks, key=lambda x: float(x.get("price", 0)))
-            bucket.best_ask = float(best_ask.get("price", 0))
-            bucket.ask_size = float(best_ask.get("size", 0))
+            if asks:
+                best_ask = min(asks, key=lambda x: float(x.get("price", 0)))
+                bucket.no_best_ask = float(best_ask.get("price", 0))
+                bucket.no_ask_size = float(best_ask.get("size", 0))
 
-        # Calculate spread
-        if bucket.best_bid > 0 and bucket.best_ask > 0:
-            bucket.spread = bucket.best_ask - bucket.best_bid
+            # CRITICAL: Update no_price to actual NO ask price (price to BUY NO)
+            # This fixes the bug where no_price was calculated as 1 - yes_price
+            # On illiquid markets, YES + NO prices do NOT equal $1.00!
+            if bucket.no_best_ask > 0:
+                bucket.no_price = bucket.no_best_ask
+                logger.debug(
+                    "Updated NO price from orderbook",
+                    outcome=bucket.outcome,
+                    no_price=bucket.no_price,
+                    no_best_ask=bucket.no_best_ask,
+                    no_best_bid=bucket.no_best_bid,
+                )
+        else:
+            # Apply to YES token fields
+            if bids:
+                # Best bid is highest price
+                best_bid = max(bids, key=lambda x: float(x.get("price", 0)))
+                bucket.best_bid = float(best_bid.get("price", 0))
+                bucket.bid_size = float(best_bid.get("size", 0))
 
-        # Update yes_price to midpoint if we have orderbook data
-        if bucket.best_bid > 0 and bucket.best_ask > 0:
-            bucket.yes_price = bucket.midpoint
+            if asks:
+                # Best ask is lowest price
+                best_ask = min(asks, key=lambda x: float(x.get("price", 0)))
+                bucket.best_ask = float(best_ask.get("price", 0))
+                bucket.ask_size = float(best_ask.get("size", 0))
+
+            # Calculate spread
+            if bucket.best_bid > 0 and bucket.best_ask > 0:
+                bucket.spread = bucket.best_ask - bucket.best_bid
+
+            # Update yes_price to midpoint if we have orderbook data
+            if bucket.best_bid > 0 and bucket.best_ask > 0:
+                bucket.yes_price = bucket.midpoint
 
 
 def create_mock_markets() -> list[WeatherMarket]:

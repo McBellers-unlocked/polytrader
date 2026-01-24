@@ -535,9 +535,26 @@ class TradingBot:
                 tradeable_opportunities.append(opp)
             elif opp.side == "SELL":
                 # SELL YES opportunity - convert to BUY NO
-                # Use getattr for backwards compatibility
                 no_token_id = getattr(opp.bucket, 'no_token_id', '')
-                no_price = getattr(opp.bucket, 'no_price', 1 - opp.bucket.yes_price)
+
+                # Get actual NO price from orderbook (no_best_ask is the price to BUY NO)
+                # CRITICAL: Do NOT use 1 - yes_price as fallback - on illiquid markets
+                # YES + NO prices do NOT equal $1.00! This caused orders at wrong prices.
+                no_best_ask = getattr(opp.bucket, 'no_best_ask', 0.0)
+
+                if no_best_ask > 0:
+                    # Use actual NO ask price from orderbook
+                    no_price = no_best_ask
+                else:
+                    # No orderbook data for NO token - skip this trade
+                    # We can't trust the calculated price
+                    logger.debug(
+                        "Skipping BUY NO - no orderbook data for NO token",
+                        outcome=opp.bucket.outcome,
+                        no_token_id=no_token_id[:16] if no_token_id else "none",
+                    )
+                    n_sells_skipped += 1
+                    continue
 
                 # Skip if NO price is too high (bad risk/reward)
                 # Buying NO at 99¢ means risking $0.99 to potentially make $0.01
