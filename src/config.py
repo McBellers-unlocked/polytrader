@@ -120,6 +120,22 @@ CITIES: dict[str, CityConfig] = {
         unit="C",
         timezone="Europe/Istanbul",
     ),
+    "buenos_aires": CityConfig(
+        name="Buenos Aires",
+        lat=-34.61,
+        lon=-58.38,
+        metar="SAEZ",
+        unit="C",
+        timezone="America/Argentina/Buenos_Aires",
+    ),
+    "wellington": CityConfig(
+        name="Wellington",
+        lat=-41.29,
+        lon=174.78,
+        metar="NZWN",
+        unit="C",
+        timezone="Pacific/Auckland",
+    ),
 }
 
 

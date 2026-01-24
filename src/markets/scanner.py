@@ -129,6 +129,8 @@ class MarketScanner:
         "chicago": [r"chicago"],
         "miami": [r"miami"],
         "ankara": [r"ankara"],
+        "buenos_aires": [r"buenos aires", r"buenos-aires"],
+        "wellington": [r"wellington"],
     }
 
     DATE_PATTERN = re.compile(
