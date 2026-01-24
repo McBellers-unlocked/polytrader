@@ -311,8 +311,24 @@ class MarketScanner:
                 end_date = datetime.utcnow()
 
             # Parse buckets from outcomes
+            # Get clobTokenIds from market level (for neg-risk bucket markets)
             city_unit = city.unit if city else "F"
-            buckets = self._parse_buckets(data.get("tokens", []), city_unit)
+            market_clob_ids = data.get("clobTokenIds", [])
+            if isinstance(market_clob_ids, str):
+                try:
+                    import json
+                    market_clob_ids = json.loads(market_clob_ids)
+                except json.JSONDecodeError:
+                    market_clob_ids = []
+
+            logger.debug(
+                "Market clobTokenIds",
+                city=city.name if city else "unknown",
+                n_market_clob_ids=len(market_clob_ids) if market_clob_ids else 0,
+                first_few_ids=market_clob_ids[:4] if market_clob_ids else [],
+            )
+
+            buckets = self._parse_buckets(data.get("tokens", []), city_unit, market_clob_ids)
 
             market = WeatherMarket(
                 condition_id=data.get("conditionId", data.get("condition_id", "")),
@@ -375,6 +391,7 @@ class MarketScanner:
         self,
         tokens: list[dict[str, Any]],
         city_unit: str = "F",
+        market_clob_ids: list | None = None,
     ) -> list[TemperatureBucket]:
         """Parse temperature buckets from token data."""
         buckets: list[TemperatureBucket] = []
@@ -401,6 +418,17 @@ class MarketScanner:
                     no_token_id = clob_token_ids[1]
                 else:
                     no_token_id = clob_token_ids[0]
+            elif market_clob_ids and token_id:
+                # Fallback: try to find NO token from market-level clobTokenIds
+                # For bucket markets, clobTokenIds is a flat list of [YES_0, NO_0, YES_1, NO_1, ...]
+                # Each YES token is followed by its corresponding NO token
+                try:
+                    idx = market_clob_ids.index(token_id)
+                    # If YES token is at even index, NO token is at next index
+                    if idx % 2 == 0 and idx + 1 < len(market_clob_ids):
+                        no_token_id = market_clob_ids[idx + 1]
+                except (ValueError, IndexError):
+                    pass
 
             # Parse bounds from outcome string
             low_bound, high_bound = self._parse_bounds(outcome)
