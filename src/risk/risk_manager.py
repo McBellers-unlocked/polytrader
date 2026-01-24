@@ -167,7 +167,7 @@ class RiskManager:
 
     # Risk limits (can be overridden via constructor)
     MAX_POSITION_PCT = 0.02  # 2% of bankroll per position
-    MAX_CONCURRENT_POSITIONS = 5
+    MAX_CONCURRENT_POSITIONS = 8
     MAX_POSITIONS_PER_MARKET = 3
     DAILY_LOSS_LIMIT_PCT = 0.05  # 5% daily loss → 24h stop
     WEEKLY_LOSS_LIMIT_PCT = 0.10  # 10% weekly loss → 7 day stop
