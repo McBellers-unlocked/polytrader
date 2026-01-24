@@ -1035,12 +1035,31 @@ class TradingBot:
         request: TradeRequest,
     ) -> bool:
         """Execute an automatic trade."""
+        # Convert dollars to shares (Polymarket orders are in shares, not dollars)
+        # suggested_size is in dollars, we need shares = dollars / price
+        if opp.price <= 0:
+            logger.warning("Invalid price for order", price=str(opp.price))
+            return False
+
+        shares = opp.suggested_size / opp.price
+
+        # Polymarket requires minimum $1 order value
+        order_value = shares * opp.price
+        if order_value < Decimal("1"):
+            logger.info(
+                "[AUTO] Order value below $1 minimum, skipping",
+                outcome=opp.bucket.outcome,
+                order_value=str(order_value),
+            )
+            return False
+
         logger.info(
             "[AUTO] Executing trade",
             outcome=opp.bucket.outcome,
             side=opp.side,
             price=str(opp.price),
-            size=str(opp.suggested_size),
+            size_dollars=str(opp.suggested_size),
+            size_shares=str(shares),
         )
 
         # Execute the order via Polymarket client
@@ -1049,7 +1068,7 @@ class TradingBot:
             token_id=opp.bucket.token_id,
             side=order_side,
             price=opp.price,
-            size=opp.suggested_size,
+            size=shares,
         )
 
         if result.success:
