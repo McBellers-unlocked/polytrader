@@ -721,6 +721,13 @@ class TradingBot:
             side = "BUY" if fv.edge > 0 else "SELL"
             price = Decimal(str(bucket.yes_price if side == "BUY" else (1 - bucket.yes_price)))
 
+            # Polymarket requires minimum 5 shares - ensure suggested_size is enough
+            # min_dollars = 5 shares * price
+            MIN_SHARES = Decimal("5")
+            min_dollars_for_min_shares = MIN_SHARES * price
+            if suggested_size < min_dollars_for_min_shares and suggested_size > 0:
+                suggested_size = min_dollars_for_min_shares
+
             # Create opportunity
             opp = TradingOpportunity(
                 market=market,
@@ -1068,13 +1075,22 @@ class TradingBot:
 
         shares = opp.suggested_size / opp.price
 
-        # Polymarket requires minimum $1 order value
+        # Polymarket requires minimum $1 order value AND minimum 5 shares
         order_value = shares * opp.price
+        MIN_SHARES = Decimal("5")
         if order_value < Decimal("1"):
             logger.info(
                 "[AUTO] Order value below $1 minimum, skipping",
                 outcome=opp.bucket.outcome,
                 order_value=str(order_value),
+            )
+            return False
+
+        if shares < MIN_SHARES:
+            logger.info(
+                "[AUTO] Share count below 5 minimum, skipping",
+                outcome=opp.bucket.outcome,
+                shares=str(shares),
             )
             return False
 

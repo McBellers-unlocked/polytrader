@@ -31,7 +31,7 @@ class TemperatureBucket:
 
     Examples: "68-69°F", "≥75°F", "<60°F"
     """
-    token_id: str
+    token_id: str  # YES token ID
     outcome_id: str
     outcome: str  # Raw string like "68-69°F"
 
@@ -43,6 +43,9 @@ class TemperatureBucket:
     # Pricing (0-1 scale, representing probability)
     yes_price: float = 0.0
     no_price: float = 0.0
+
+    # NO token for BUY NO trades
+    no_token_id: str = ""  # NO token ID (for neg-risk markets)
 
     # Orderbook data
     best_bid: float = 0.0
@@ -562,8 +565,10 @@ class MarketScanner:
                 elif isinstance(outcome_prices, list) and len(outcome_prices) > 0:
                     yes_price = float(outcome_prices[0])
 
-            # Parse token ID - clobTokenIds may be a JSON array string
+            # Parse token IDs - clobTokenIds may be a JSON array string
+            # Format: [YES_token_id, NO_token_id]
             token_id = ""
+            no_token_id = ""
             clob_token_ids = sub_market.get("clobTokenIds", "")
             if clob_token_ids:
                 if isinstance(clob_token_ids, str):
@@ -572,13 +577,17 @@ class MarketScanner:
                         try:
                             ids = json.loads(clob_token_ids)
                             if isinstance(ids, list) and len(ids) > 0:
-                                token_id = str(ids[0])  # Use first token (YES token)
+                                token_id = str(ids[0])  # First token (YES token)
+                            if isinstance(ids, list) and len(ids) > 1:
+                                no_token_id = str(ids[1])  # Second token (NO token)
                         except json.JSONDecodeError:
                             token_id = clob_token_ids
                     else:
                         token_id = clob_token_ids
                 elif isinstance(clob_token_ids, list) and len(clob_token_ids) > 0:
                     token_id = str(clob_token_ids[0])
+                    if len(clob_token_ids) > 1:
+                        no_token_id = str(clob_token_ids[1])
 
             # Fallback to conditionId if no token_id
             if not token_id:
@@ -591,10 +600,20 @@ class MarketScanner:
                 yes_price=yes_price,
                 no_price=1.0 - yes_price,
                 volume_24h=float(sub_market.get("volume24hr", 0) or 0),
+                no_token_id=no_token_id,
             )
 
             # Parse the temperature bounds
             self._parse_bucket_bounds(bucket, outcome_str, city.unit)
+
+            # Debug logging for NO token extraction
+            if no_token_id:
+                logger.debug(
+                    "Extracted NO token",
+                    outcome=outcome_str,
+                    yes_token=token_id[:20] + "..." if len(token_id) > 20 else token_id,
+                    no_token=no_token_id[:20] + "..." if len(no_token_id) > 20 else no_token_id,
+                )
 
             return bucket
 
