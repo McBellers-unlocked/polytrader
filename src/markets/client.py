@@ -72,18 +72,24 @@ class PolymarketClient:
             try:
                 from py_clob_client.client import ClobClient
 
-                # Initialize client - it will derive API credentials from private key
+                # Initialize client with POLY_PROXY signature type (1)
+                # This is required when using Polymarket proxy wallets
+                # Signature types: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE
                 self._clob_client = ClobClient(
                     host=self.settings.polymarket_clob_url,
                     chain_id=137,  # Polygon
                     key=self.settings.polymarket_private_key,
                     funder=self.settings.polymarket_funder,
+                    signature_type=1,  # POLY_PROXY for Polymarket proxy wallets
                 )
 
                 # Derive and set API credentials from private key
                 self._clob_client.set_api_creds(self._clob_client.derive_api_key())
 
-                logger.info("CLOB client initialized with derived API credentials")
+                logger.info(
+                    "CLOB client initialized with POLY_PROXY signature type",
+                    funder=self.settings.polymarket_funder,
+                )
 
             except ImportError:
                 logger.warning("py-clob-client not installed, using paper trading")
