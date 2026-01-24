@@ -426,14 +426,31 @@ class TradingBot:
         # Update daily stats
         self._daily_stats["opportunities"] += len(all_opportunities)
 
-        # 5. Sort opportunities by expected profit
-        all_opportunities.sort(key=lambda x: x.priority_score, reverse=True)
+        # 5. Filter opportunities based on what's actually tradeable
+        # For now, only BUY opportunities are feasible without existing positions
+        # TODO: Track positions and allow SELL when we own tokens
+        tradeable_opportunities = [
+            opp for opp in all_opportunities
+            if opp.side == "BUY"
+        ]
+
+        # Log if we filtered out SELL opportunities
+        n_sells_filtered = len(all_opportunities) - len(tradeable_opportunities)
+        if n_sells_filtered > 0:
+            logger.info(
+                "Filtered SELL opportunities (no positions to sell)",
+                n_filtered=n_sells_filtered,
+                n_remaining=len(tradeable_opportunities),
+            )
+
+        # Sort by expected profit
+        tradeable_opportunities.sort(key=lambda x: x.priority_score, reverse=True)
 
         # Track trade results for each opportunity
         trade_results: dict[int, tuple[bool, str | None]] = {}
 
         # 6. Execute trades (top 3)
-        for i, opp in enumerate(all_opportunities[:3]):
+        for i, opp in enumerate(tradeable_opportunities[:3]):
             try:
                 executed, blocked_reason = await self._execute_opportunity(opp)
                 trade_results[i] = (executed, blocked_reason)
