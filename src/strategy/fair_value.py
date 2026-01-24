@@ -95,11 +95,13 @@ class FairValueCalculator:
             fair_value = self._calculate_bucket_probability(bucket, forecast)
             market_price = bucket.yes_price
 
-            # Calculate edge
-            if market_price > 0:
-                edge = (fair_value - market_price) / market_price
+            # Calculate edge - skip buckets with 0% market price (no liquidity)
+            if market_price <= 0.001:  # Treat < 0.1% as effectively zero
+                # Can't calculate meaningful edge, skip this bucket
+                edge = 0.0
+                confidence = 0.0  # Mark as no confidence
             else:
-                edge = float("inf") if fair_value > 0 else 0
+                edge = (fair_value - market_price) / market_price
 
             # Confidence is based on forecast confidence and sample size
             confidence = forecast.confidence * min(

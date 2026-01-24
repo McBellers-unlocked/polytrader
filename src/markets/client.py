@@ -154,17 +154,36 @@ class PolymarketClient:
             )
 
         except Exception as e:
+            error_str = str(e)
+
+            # Check for Cloudflare block
+            if "403" in error_str and ("cloudflare" in error_str.lower() or "blocked" in error_str.lower()):
+                logger.error(
+                    "CLOUDFLARE BLOCK: Your IP is blocked by Polymarket's firewall. "
+                    "This typically happens when running from datacenter IPs. "
+                    "Options: 1) Run from residential network, 2) Use residential proxy, "
+                    "3) Contact Polymarket about API access.",
+                    token_id=token_id,
+                    side=side.value,
+                )
+                return OrderResponse(
+                    order_id="",
+                    success=False,
+                    status="CLOUDFLARE_BLOCKED",
+                    message="IP blocked by Cloudflare. Run from residential network or use proxy.",
+                )
+
             logger.error(
                 "Order placement failed",
                 token_id=token_id,
                 side=side.value,
-                error=str(e),
+                error=error_str[:200],  # Truncate long error messages
             )
             return OrderResponse(
                 order_id="",
                 success=False,
                 status="ERROR",
-                message=str(e),
+                message=error_str[:200],
             )
 
     async def cancel_order(self, order_id: str) -> bool:
