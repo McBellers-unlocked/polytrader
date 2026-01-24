@@ -632,6 +632,10 @@ class RiskManager:
     # Position Management
     # =========================================================================
 
+    def has_position(self, token_id: str) -> bool:
+        """Check if we already have a position in this token."""
+        return token_id in self._positions
+
     def record_trade_open(self, position: Position) -> None:
         """Record opening a new position."""
         self._positions[position.token_id] = position

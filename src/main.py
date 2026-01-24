@@ -437,19 +437,61 @@ class TradingBot:
         tradeable_opportunities: list[TradingOpportunity] = []
         n_sells_converted = 0
         n_sells_skipped = 0
+        n_penny_picking_skipped = 0  # Trades skipped due to bad risk/reward
+
+        # Maximum NO price to accept - avoid "penny in front of steamroller" trades
+        # At 90¢, you risk $0.90 to make $0.10 = 9:1 risk/reward (terrible)
+        # At 95¢, you risk $0.95 to make $0.05 = 19:1 risk/reward (awful)
+        MAX_NO_PRICE = 0.90
+        n_duplicate_skipped = 0
 
         for opp in all_opportunities:
             if opp.side == "BUY":
                 # BUY YES - use the YES token
                 opp.effective_token_id = opp.bucket.token_id
                 opp.is_buy_no = False
+
+                # Check if we already have a position in this token
+                if self.risk_manager.has_position(opp.effective_token_id):
+                    logger.debug(
+                        "Skipping duplicate position",
+                        outcome=opp.bucket.outcome,
+                        token_id=opp.effective_token_id[:16],
+                    )
+                    n_duplicate_skipped += 1
+                    continue
+
                 tradeable_opportunities.append(opp)
             elif opp.side == "SELL":
                 # SELL YES opportunity - convert to BUY NO
                 # Use getattr for backwards compatibility
                 no_token_id = getattr(opp.bucket, 'no_token_id', '')
                 no_price = getattr(opp.bucket, 'no_price', 1 - opp.bucket.yes_price)
+
+                # Skip if NO price is too high (bad risk/reward)
+                # Buying NO at 99¢ means risking $0.99 to potentially make $0.01
+                if no_price > MAX_NO_PRICE:
+                    logger.info(
+                        "Skipping BUY NO - penny picking (bad risk/reward)",
+                        outcome=opp.bucket.outcome,
+                        no_price=f"${no_price:.3f}",
+                        max_allowed=f"${MAX_NO_PRICE:.2f}",
+                        risk_reward=f"{no_price/(1-no_price):.1f}:1",
+                    )
+                    n_penny_picking_skipped += 1
+                    continue
+
                 if no_token_id:
+                    # Check if we already have a position in this NO token
+                    if self.risk_manager.has_position(no_token_id):
+                        logger.debug(
+                            "Skipping duplicate NO position",
+                            outcome=opp.bucket.outcome,
+                            token_id=no_token_id[:16],
+                        )
+                        n_duplicate_skipped += 1
+                        continue
+
                     # Convert: SELL YES at price P -> BUY NO at price (1-P)
                     # The edge is the same magnitude but we're buying underpriced NO
                     opp.side = "BUY"
@@ -462,11 +504,13 @@ class TradingBot:
                     # No NO token available, skip
                     n_sells_skipped += 1
 
-        if n_sells_converted > 0 or n_sells_skipped > 0:
+        if n_sells_converted > 0 or n_sells_skipped > 0 or n_penny_picking_skipped > 0 or n_duplicate_skipped > 0:
             logger.info(
-                "Processed SELL opportunities",
+                "Processed opportunities",
                 converted_to_buy_no=n_sells_converted,
                 skipped_no_token=n_sells_skipped,
+                skipped_penny_picking=n_penny_picking_skipped,
+                skipped_duplicate=n_duplicate_skipped,
             )
 
         # Sort by expected profit
