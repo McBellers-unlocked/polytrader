@@ -178,8 +178,7 @@ class TradingBot:
     4. Executes trades when criteria are met
     """
 
-    # Timing
-    LOOP_INTERVAL_SECONDS = 30
+    # Timing (interval now configurable via SCAN_INTERVAL_SECONDS env var)
     MIN_HOURS_TO_RESOLUTION = 1
     MAX_HOURS_TO_RESOLUTION = 72
 
@@ -310,18 +309,18 @@ class TradingBot:
                     **iteration.to_dict(),
                 )
 
-                # Wait before next iteration
+                # Wait before next iteration (configurable via SCAN_INTERVAL_SECONDS)
                 try:
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
-                        timeout=self.LOOP_INTERVAL_SECONDS,
+                        timeout=self.settings.scan_interval_seconds,
                     )
                 except asyncio.TimeoutError:
                     pass
 
             except Exception as e:
                 logger.error("Error in trading loop", error=str(e), exc_info=True)
-                await asyncio.sleep(self.LOOP_INTERVAL_SECONDS)
+                await asyncio.sleep(self.settings.scan_interval_seconds)
 
     async def _run_iteration(self) -> TradingIteration:
         """Run a single trading iteration."""

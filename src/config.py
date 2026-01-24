@@ -146,6 +146,10 @@ class Settings(BaseSettings):
 
     # API keys
     tomorrow_io_api_key: str = Field(default="")
+    open_meteo_api_key: str = Field(default="")  # For paid Open-Meteo plans
+
+    # Scan interval
+    scan_interval_seconds: int = Field(default=60, ge=10)  # Time between trading iterations
 
     # Risk parameters
     max_position_pct: float = Field(default=0.02, ge=0, le=1)

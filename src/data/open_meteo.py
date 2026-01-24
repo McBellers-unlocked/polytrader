@@ -17,7 +17,7 @@ import aiohttp
 import numpy as np
 from numpy.typing import NDArray
 
-from src.config import CityConfig, CITIES
+from src.config import CityConfig, CITIES, get_settings
 from src.logging import get_logger
 
 logger = get_logger(__name__)
@@ -169,6 +169,7 @@ class OpenMeteoClient:
         self._session = session
         self._owns_session = session is None
         self.models = models or ENSEMBLE_MODELS
+        self.settings = get_settings()
 
     async def __aenter__(self) -> "OpenMeteoClient":
         """Async context manager entry."""
@@ -290,6 +291,10 @@ class OpenMeteoClient:
             "forecast_days": min(forecast_days, 16),
             "timezone": "UTC",
         }
+
+        # Add API key for paid Open-Meteo plans
+        if self.settings.open_meteo_api_key:
+            params["apikey"] = self.settings.open_meteo_api_key
 
         async with self._session.get(
             ENSEMBLE_API_URL,
