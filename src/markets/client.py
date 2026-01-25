@@ -328,21 +328,26 @@ class PolymarketClient:
                 bids = data.get("bids", [])
                 asks = data.get("asks", [])
 
-                # Debug: log raw orderbook data (temporarily INFO to diagnose)
-                logger.info(
-                    "Orderbook response",
-                    token_id=token_id[:20],
-                    n_bids=len(bids),
-                    n_asks=len(asks),
-                    best_bid_price=bids[0].get("price") if bids else None,
-                    best_ask_price=asks[0].get("price") if asks else None,
-                )
-
                 # Get best bid and ask - return None if orderbook is empty
                 best_bid = float(bids[0]["price"]) if bids else None
                 best_ask = float(asks[0]["price"]) if asks else None
 
+                # Check if spread is too wide to determine meaningful price
+                # Wide spreads (e.g., bid=0.01, ask=0.99) give meaningless mid-prices
                 if best_bid is not None and best_ask is not None:
+                    spread = best_ask - best_bid
+                    MAX_USEFUL_SPREAD = 0.30  # 30 cents spread max
+
+                    if spread > MAX_USEFUL_SPREAD:
+                        logger.debug(
+                            "Orderbook spread too wide - skipping price check",
+                            token_id=token_id[:20],
+                            best_bid=best_bid,
+                            best_ask=best_ask,
+                            spread=spread,
+                        )
+                        return None
+
                     return (best_bid + best_ask) / 2
                 elif best_bid is not None:
                     return best_bid
