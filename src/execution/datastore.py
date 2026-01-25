@@ -385,6 +385,106 @@ class DataStore:
 
             CREATE INDEX IF NOT EXISTS idx_arb_timestamp ON arbitrage_opportunities(timestamp);
             CREATE INDEX IF NOT EXISTS idx_arb_city ON arbitrage_opportunities(city);
+
+            -- =====================================================
+            -- PREDICTION_RECORDS: All predictions for ML training
+            -- Captures model probability vs market for every bucket
+            -- =====================================================
+            CREATE TABLE IF NOT EXISTS prediction_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                -- Identification
+                timestamp TEXT NOT NULL,
+                condition_id TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+
+                -- Temperature bucket bounds
+                bucket_low REAL,
+                bucket_high REAL,
+                unit TEXT NOT NULL,
+
+                -- Model predictions at time of prediction
+                model_probability REAL NOT NULL,
+                market_probability REAL NOT NULL,
+                calculated_edge REAL NOT NULL,
+
+                -- Forecast features (for ML training)
+                ensemble_mean REAL NOT NULL,
+                ensemble_std REAL NOT NULL,
+                ensemble_n_members INTEGER NOT NULL,
+                ensemble_p10 REAL,
+                ensemble_p50 REAL,
+                ensemble_p90 REAL,
+                model_agreement REAL NOT NULL,
+                hours_to_resolution REAL NOT NULL,
+
+                -- Per-model forecasts (JSON)
+                model_means JSON,
+
+                -- Tomorrow.io (if available)
+                tomorrow_io_high REAL,
+                tomorrow_io_blended INTEGER DEFAULT 0,
+
+                -- METAR nowcasting (if applicable)
+                metar_max_temp REAL,
+                metar_hours_remaining REAL,
+
+                -- Trading decision
+                was_traded INTEGER NOT NULL DEFAULT 0,
+                trade_side TEXT,
+                trade_price REAL,
+                trade_size REAL,
+                trade_blocked_reason TEXT,
+
+                -- Resolution (populated after market closes)
+                is_resolved INTEGER NOT NULL DEFAULT 0,
+                resolved_at TEXT,
+                actual_temperature REAL,
+                actual_outcome TEXT,
+                prediction_correct INTEGER,
+                trade_pnl REAL,
+
+                -- Raw data for debugging (JSON)
+                raw_forecast_data JSON,
+                raw_market_data JSON
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_pred_city_date ON prediction_records(city, target_date);
+            CREATE INDEX IF NOT EXISTS idx_pred_resolved ON prediction_records(is_resolved);
+            CREATE INDEX IF NOT EXISTS idx_pred_traded ON prediction_records(was_traded);
+            CREATE INDEX IF NOT EXISTS idx_pred_timestamp ON prediction_records(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_pred_condition ON prediction_records(condition_id);
+
+            -- =====================================================
+            -- RESOLVED_MARKETS: Market resolution data from Wunderground
+            -- =====================================================
+            CREATE TABLE IF NOT EXISTS resolved_markets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                -- Market identification
+                condition_id TEXT NOT NULL UNIQUE,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+
+                -- Resolution data (from Wunderground)
+                resolved_at TEXT NOT NULL,
+                actual_temperature REAL NOT NULL,
+                winning_outcome TEXT NOT NULL,
+
+                -- Resolution source
+                wunderground_url TEXT,
+                resolution_source TEXT DEFAULT 'wunderground',
+
+                -- Verification
+                resolution_verified INTEGER DEFAULT 0,
+                notes TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_resolved_city_date ON resolved_markets(city, target_date);
+            CREATE INDEX IF NOT EXISTS idx_resolved_condition ON resolved_markets(condition_id);
         """)
         await self._connection.commit()
 
@@ -1076,6 +1176,288 @@ class DataStore:
         ))
         await self._connection.commit()
         return cursor.lastrowid or -1
+
+    # =========================================================================
+    # PREDICTION RECORDS (for ML training)
+    # =========================================================================
+
+    async def save_prediction_record(
+        self,
+        timestamp: datetime,
+        condition_id: str,
+        token_id: str,
+        city: str,
+        target_date: date,
+        outcome: str,
+        bucket_low: float | None,
+        bucket_high: float | None,
+        unit: str,
+        model_probability: float,
+        market_probability: float,
+        calculated_edge: float,
+        ensemble_mean: float,
+        ensemble_std: float,
+        ensemble_n_members: int,
+        model_agreement: float,
+        hours_to_resolution: float,
+        ensemble_p10: float | None = None,
+        ensemble_p50: float | None = None,
+        ensemble_p90: float | None = None,
+        model_means: dict | None = None,
+        tomorrow_io_high: float | None = None,
+        tomorrow_io_blended: bool = False,
+        metar_max_temp: float | None = None,
+        metar_hours_remaining: float | None = None,
+        raw_forecast_data: dict | None = None,
+        raw_market_data: dict | None = None,
+    ) -> int:
+        """Save a prediction record for ML training."""
+        if not self._connection:
+            return -1
+
+        cursor = await self._connection.execute("""
+            INSERT INTO prediction_records (
+                timestamp, condition_id, token_id, city, target_date, outcome,
+                bucket_low, bucket_high, unit, model_probability, market_probability,
+                calculated_edge, ensemble_mean, ensemble_std, ensemble_n_members,
+                model_agreement, hours_to_resolution, ensemble_p10, ensemble_p50,
+                ensemble_p90, model_means, tomorrow_io_high, tomorrow_io_blended,
+                metar_max_temp, metar_hours_remaining, raw_forecast_data, raw_market_data
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            timestamp.isoformat(),
+            condition_id,
+            token_id,
+            city,
+            target_date.isoformat(),
+            outcome,
+            bucket_low,
+            bucket_high,
+            unit,
+            model_probability,
+            market_probability,
+            calculated_edge,
+            ensemble_mean,
+            ensemble_std,
+            ensemble_n_members,
+            model_agreement,
+            hours_to_resolution,
+            ensemble_p10,
+            ensemble_p50,
+            ensemble_p90,
+            json.dumps(model_means) if model_means else None,
+            tomorrow_io_high,
+            1 if tomorrow_io_blended else 0,
+            metar_max_temp,
+            metar_hours_remaining,
+            json.dumps(raw_forecast_data) if raw_forecast_data else None,
+            json.dumps(raw_market_data) if raw_market_data else None,
+        ))
+        await self._connection.commit()
+        return cursor.lastrowid or -1
+
+    async def update_prediction_traded(
+        self,
+        prediction_id: int,
+        trade_side: str,
+        trade_price: float,
+        trade_size: float,
+    ) -> None:
+        """Mark a prediction as traded."""
+        if not self._connection:
+            return
+
+        await self._connection.execute("""
+            UPDATE prediction_records
+            SET was_traded = 1, trade_side = ?, trade_price = ?, trade_size = ?
+            WHERE id = ?
+        """, (trade_side, trade_price, trade_size, prediction_id))
+        await self._connection.commit()
+
+    async def resolve_prediction(
+        self,
+        prediction_id: int,
+        actual_temperature: float,
+        actual_outcome: str,
+        prediction_correct: bool,
+        trade_pnl: float | None = None,
+    ) -> None:
+        """Mark a prediction as resolved with actual outcome."""
+        if not self._connection:
+            return
+
+        await self._connection.execute("""
+            UPDATE prediction_records
+            SET is_resolved = 1, resolved_at = ?, actual_temperature = ?,
+                actual_outcome = ?, prediction_correct = ?, trade_pnl = ?
+            WHERE id = ?
+        """, (
+            datetime.utcnow().isoformat(),
+            actual_temperature,
+            actual_outcome,
+            1 if prediction_correct else 0,
+            trade_pnl,
+            prediction_id,
+        ))
+        await self._connection.commit()
+
+    async def get_unresolved_predictions(
+        self,
+        before_date: date | None = None,
+    ) -> list[dict]:
+        """Get predictions that haven't been resolved yet."""
+        if not self._connection:
+            return []
+
+        query = """
+            SELECT * FROM prediction_records
+            WHERE is_resolved = 0
+        """
+        params: list[Any] = []
+
+        if before_date:
+            query += " AND target_date < ?"
+            params.append(before_date.isoformat())
+
+        query += " ORDER BY target_date, city"
+
+        results = []
+        async with self._connection.execute(query, params) as cursor:
+            async for row in cursor:
+                results.append(dict(row))
+        return results
+
+    async def get_resolved_predictions(
+        self,
+        city: str | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        traded_only: bool = False,
+    ) -> list[dict]:
+        """Get resolved predictions for analysis."""
+        if not self._connection:
+            return []
+
+        query = "SELECT * FROM prediction_records WHERE is_resolved = 1"
+        params: list[Any] = []
+
+        if city:
+            query += " AND city = ?"
+            params.append(city)
+        if start_date:
+            query += " AND target_date >= ?"
+            params.append(start_date.isoformat())
+        if end_date:
+            query += " AND target_date <= ?"
+            params.append(end_date.isoformat())
+        if traded_only:
+            query += " AND was_traded = 1"
+
+        query += " ORDER BY target_date DESC, city"
+
+        results = []
+        async with self._connection.execute(query, params) as cursor:
+            async for row in cursor:
+                results.append(dict(row))
+        return results
+
+    async def get_prediction_by_token(
+        self,
+        token_id: str,
+        target_date: date,
+    ) -> dict | None:
+        """Get a prediction record by token ID and date."""
+        if not self._connection:
+            return None
+
+        async with self._connection.execute("""
+            SELECT * FROM prediction_records
+            WHERE token_id = ? AND target_date = ?
+            ORDER BY timestamp DESC LIMIT 1
+        """, (token_id, target_date.isoformat())) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    # =========================================================================
+    # RESOLVED MARKETS (from Wunderground)
+    # =========================================================================
+
+    async def save_resolved_market(
+        self,
+        condition_id: str,
+        city: str,
+        target_date: date,
+        actual_temperature: float,
+        winning_outcome: str,
+        wunderground_url: str | None = None,
+    ) -> int:
+        """Save a resolved market with its actual temperature."""
+        if not self._connection:
+            return -1
+
+        cursor = await self._connection.execute("""
+            INSERT OR REPLACE INTO resolved_markets (
+                condition_id, city, target_date, resolved_at, actual_temperature,
+                winning_outcome, wunderground_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            condition_id,
+            city,
+            target_date.isoformat(),
+            datetime.utcnow().isoformat(),
+            actual_temperature,
+            winning_outcome,
+            wunderground_url,
+        ))
+        await self._connection.commit()
+        return cursor.lastrowid or -1
+
+    async def get_resolved_market(
+        self,
+        condition_id: str,
+    ) -> dict | None:
+        """Get a resolved market by condition ID."""
+        if not self._connection:
+            return None
+
+        async with self._connection.execute("""
+            SELECT * FROM resolved_markets WHERE condition_id = ?
+        """, (condition_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+        return None
+
+    async def get_markets_pending_resolution(
+        self,
+        before_date: date | None = None,
+    ) -> list[dict]:
+        """Get markets that need resolution data fetched."""
+        if not self._connection:
+            return []
+
+        # Find condition_ids with predictions but no resolution
+        query = """
+            SELECT DISTINCT p.condition_id, p.city, p.target_date
+            FROM prediction_records p
+            LEFT JOIN resolved_markets r ON p.condition_id = r.condition_id
+            WHERE r.condition_id IS NULL AND p.is_resolved = 0
+        """
+        params: list[Any] = []
+
+        if before_date:
+            query += " AND p.target_date < ?"
+            params.append(before_date.isoformat())
+
+        query += " ORDER BY p.target_date"
+
+        results = []
+        async with self._connection.execute(query, params) as cursor:
+            async for row in cursor:
+                results.append(dict(row))
+        return results
 
     # =========================================================================
     # STATISTICS

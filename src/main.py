@@ -822,7 +822,15 @@ class TradingBot:
             current_temp=current_temp,
         )
 
-        # 4. Find trading opportunities
+        # 4a. Record ALL predictions for ML training (before filtering)
+        prediction_ids = await self._record_predictions(
+            market=market,
+            forecast=forecast,
+            analysis=analysis,
+            constraint=constraint,
+        )
+
+        # 4b. Find trading opportunities
         opportunities: list[TradingOpportunity] = []
         bankroll = self.risk_manager.current_bankroll
 
@@ -1040,6 +1048,88 @@ class TradingBot:
                 error=str(e),
             )
 
+    async def _record_predictions(
+        self,
+        market: WeatherMarket,
+        forecast: EnsembleForecastResult,
+        analysis: MarketFairValue,
+        constraint: TemperatureConstraint | None,
+    ) -> dict[str, int]:
+        """
+        Record ALL bucket predictions for ML training.
+
+        Records every bucket's model probability vs market probability,
+        not just the ones we trade. Essential for calibration analysis.
+
+        Returns:
+            Dict mapping token_id -> prediction_record_id
+        """
+        prediction_ids: dict[str, int] = {}
+
+        if not market.city or not market.target_date:
+            return prediction_ids
+
+        city = market.city
+        target_date = market.target_date
+        now = datetime.utcnow()
+
+        # Check if Tomorrow.io was blended (check if we have more than 71 members)
+        tomorrow_blended = len(forecast.temperatures) > 71
+
+        for fv in analysis.buckets:
+            # Find corresponding bucket for bounds
+            bucket = next(
+                (b for b in market.buckets if b.token_id == fv.token_id),
+                None
+            )
+
+            try:
+                pred_id = await self.datastore.save_prediction_record(
+                    timestamp=now,
+                    condition_id=market.condition_id,
+                    token_id=fv.token_id,
+                    city=city.name,
+                    target_date=target_date,
+                    outcome=fv.outcome,
+                    bucket_low=fv.low_bound,
+                    bucket_high=fv.high_bound,
+                    unit=city.unit,
+                    model_probability=fv.fair_probability,
+                    market_probability=fv.market_probability,
+                    calculated_edge=fv.edge,
+                    ensemble_mean=forecast.mean,
+                    ensemble_std=forecast.std,
+                    ensemble_n_members=len(forecast.temperatures),
+                    model_agreement=fv.model_agreement,
+                    hours_to_resolution=market.hours_until_close,
+                    ensemble_p10=forecast.p10,
+                    ensemble_p50=forecast.p50,
+                    ensemble_p90=forecast.p90,
+                    model_means=getattr(forecast, 'model_means', None),
+                    tomorrow_io_high=getattr(forecast, 'tomorrow_high', None),
+                    tomorrow_io_blended=tomorrow_blended,
+                    metar_max_temp=constraint.max_temp_observed if constraint else None,
+                    metar_hours_remaining=constraint.hours_until_close if constraint else None,
+                )
+                prediction_ids[fv.token_id] = pred_id
+
+            except Exception as e:
+                logger.warning(
+                    "Failed to save prediction record",
+                    outcome=fv.outcome,
+                    error=str(e),
+                )
+
+        if prediction_ids:
+            logger.debug(
+                "Recorded predictions for ML training",
+                city=city.name,
+                target_date=str(target_date),
+                n_predictions=len(prediction_ids),
+            )
+
+        return prediction_ids
+
     async def _execute_opportunity(
         self,
         opp: TradingOpportunity,
@@ -1239,6 +1329,20 @@ class TradingBot:
             "opened_at": datetime.utcnow().isoformat(),
         }
 
+        # Update prediction record to mark as traded (for ML training)
+        if opp.market.target_date:
+            pred = await self.datastore.get_prediction_by_token(
+                token_id=opp.bucket.token_id,
+                target_date=opp.market.target_date,
+            )
+            if pred:
+                await self.datastore.update_prediction_traded(
+                    prediction_id=pred['id'],
+                    trade_side=opp.side,
+                    trade_price=float(opp.price),
+                    trade_size=float(opp.suggested_size),
+                )
+
         # Simulate P&L (simplified: assume we win/lose based on edge direction)
         # In reality, this would track until market resolution
         simulated_pnl = Decimal(str(round(opp.expected_profit, 2)))
@@ -1390,6 +1494,20 @@ class TradingBot:
                 opened_at=datetime.utcnow(),
             )
             self.risk_manager.record_trade_open(position)
+
+            # Update prediction record to mark as traded (for ML training)
+            if opp.market.target_date:
+                pred = await self.datastore.get_prediction_by_token(
+                    token_id=opp.bucket.token_id,
+                    target_date=opp.market.target_date,
+                )
+                if pred:
+                    await self.datastore.update_prediction_traded(
+                        prediction_id=pred['id'],
+                        trade_side=trade_type,
+                        trade_price=float(opp.price),
+                        trade_size=float(opp.suggested_size),
+                    )
 
             return True
         else:

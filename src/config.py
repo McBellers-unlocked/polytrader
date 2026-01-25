@@ -26,6 +26,7 @@ class CityConfig:
         metar: str,
         unit: str,
         timezone: str = "UTC",
+        wunderground_url: str = "",
     ):
         self.name = name
         self.lat = lat
@@ -33,13 +34,16 @@ class CityConfig:
         self.metar = metar
         self.unit = unit  # "F" or "C"
         self.timezone = timezone
+        # Wunderground history URL for resolution tracking
+        # e.g., "us/wa/seatac/KSEA" -> https://www.wunderground.com/history/daily/us/wa/seatac/KSEA
+        self.wunderground_url = wunderground_url
 
     def __repr__(self) -> str:
         return f"CityConfig({self.name}, {self.lat}, {self.lon}, {self.metar}, {self.unit})"
 
 
 # Predefined city configurations - coordinates match airport/METAR station locations
-# since Polymarket markets resolve based on airport temperatures
+# since Polymarket markets resolve based on airport temperatures (via Wunderground)
 CITIES: dict[str, CityConfig] = {
     "nyc": CityConfig(
         name="New York City",
@@ -48,6 +52,7 @@ CITIES: dict[str, CityConfig] = {
         metar="KLGA",
         unit="F",
         timezone="America/New_York",
+        wunderground_url="us/ny/new-york-city/KLGA",
     ),
     "london": CityConfig(
         name="London",
@@ -56,6 +61,7 @@ CITIES: dict[str, CityConfig] = {
         metar="EGLC",
         unit="C",
         timezone="Europe/London",
+        wunderground_url="gb/london/EGLC",
     ),
     "seoul": CityConfig(
         name="Seoul",
@@ -64,6 +70,7 @@ CITIES: dict[str, CityConfig] = {
         metar="RKSI",
         unit="C",
         timezone="Asia/Seoul",
+        wunderground_url="kr/incheon/RKSI",
     ),
     "dallas": CityConfig(
         name="Dallas",
@@ -72,6 +79,7 @@ CITIES: dict[str, CityConfig] = {
         metar="KDAL",
         unit="F",
         timezone="America/Chicago",
+        wunderground_url="us/tx/dallas/KDAL",
     ),
     "toronto": CityConfig(
         name="Toronto",
@@ -80,6 +88,7 @@ CITIES: dict[str, CityConfig] = {
         metar="CYYZ",
         unit="C",
         timezone="America/Toronto",
+        wunderground_url="ca/on/toronto/CYYZ",
     ),
     "seattle": CityConfig(
         name="Seattle",
@@ -88,6 +97,7 @@ CITIES: dict[str, CityConfig] = {
         metar="KSEA",
         unit="F",
         timezone="America/Los_Angeles",
+        wunderground_url="us/wa/seatac/KSEA",
     ),
     "atlanta": CityConfig(
         name="Atlanta",
@@ -96,6 +106,7 @@ CITIES: dict[str, CityConfig] = {
         metar="KATL",
         unit="F",
         timezone="America/New_York",
+        wunderground_url="us/ga/atlanta/KATL",
     ),
     "chicago": CityConfig(
         name="Chicago",
@@ -104,6 +115,7 @@ CITIES: dict[str, CityConfig] = {
         metar="KORD",
         unit="F",
         timezone="America/Chicago",
+        wunderground_url="us/il/chicago/KORD",
     ),
     "miami": CityConfig(
         name="Miami",
@@ -112,6 +124,7 @@ CITIES: dict[str, CityConfig] = {
         metar="KMIA",
         unit="F",
         timezone="America/New_York",
+        wunderground_url="us/fl/miami/KMIA",
     ),
     "ankara": CityConfig(
         name="Ankara",
@@ -120,6 +133,7 @@ CITIES: dict[str, CityConfig] = {
         metar="LTAC",
         unit="C",
         timezone="Europe/Istanbul",
+        wunderground_url="tr/ankara/LTAC",
     ),
     "buenos_aires": CityConfig(
         name="Buenos Aires",
@@ -128,6 +142,7 @@ CITIES: dict[str, CityConfig] = {
         metar="SAEZ",
         unit="C",
         timezone="America/Argentina/Buenos_Aires",
+        wunderground_url="ar/buenos-aires/SAEZ",
     ),
     "wellington": CityConfig(
         name="Wellington",
@@ -136,6 +151,7 @@ CITIES: dict[str, CityConfig] = {
         metar="NZWN",
         unit="C",
         timezone="Pacific/Auckland",
+        wunderground_url="nz/wellington/NZWN",
     ),
 }
 
