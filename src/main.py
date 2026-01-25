@@ -326,12 +326,31 @@ class TradingBot:
                         value=round(position_value, 4),
                     )
 
+            # Log all positions for visibility
+            position_details = []
+            for tid, pos in self.risk_manager._positions.items():
+                position_details.append({
+                    "outcome": pos.outcome[:30] if pos.outcome else "?",
+                    "size": float(pos.size),
+                    "value": round(float(pos.size * pos.current_price), 2),
+                })
+
             logger.info(
                 "Loaded existing positions from Polymarket",
                 position_count=loaded_count,
+                max_positions=self.settings.max_concurrent_positions,
+                slots_available=self.settings.max_concurrent_positions - loaded_count,
                 skipped_dust=skipped_dust,
-                token_ids=[p[:16] + "..." for p in list(self.risk_manager._positions.keys())[:5]],
             )
+
+            # Log each position individually so user can see what's counted
+            for detail in position_details:
+                logger.info(
+                    "Position loaded",
+                    outcome=detail["outcome"],
+                    size=detail["size"],
+                    value=f"${detail['value']:.2f}",
+                )
 
         except Exception as e:
             logger.warning(
