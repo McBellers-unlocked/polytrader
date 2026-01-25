@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}Live Positions - Polytrader{% endblock %}
+
+{% block content %}
+<div class="mb-8">
+    <h1 class="text-3xl font-bold mb-2">Live Polymarket Positions</h1>
+    <p class="text-gray-400">Real-time view of your open positions from Polymarket</p>
+</div>
+
+<!-- Portfolio Summary -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+    <div class="card rounded-xl p-6">
+        <div class="text-gray-400 text-sm mb-1">Total Value</div>
+        <div class="text-3xl font-bold">${{ "%.2f"|format(total_value) }}</div>
+    </div>
+    <div class="card rounded-xl p-6">
+        <div class="text-gray-400 text-sm mb-1">Total Cost</div>
+        <div class="text-3xl font-bold text-gray-300">${{ "%.2f"|format(total_cost) }}</div>
+    </div>
+    <div class="card rounded-xl p-6">
+        <div class="text-gray-400 text-sm mb-1">Unrealized P&L</div>
+        <div class="text-3xl font-bold {% if total_pnl >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+            ${{ "%+.2f"|format(total_pnl) }}
+        </div>
+    </div>
+    <div class="card rounded-xl p-6">
+        <div class="text-gray-400 text-sm mb-1">Positions</div>
+        <div class="text-3xl font-bold">{{ position_count }}</div>
+    </div>
+</div>
+
+<!-- Positions Table -->
+<div class="card rounded-xl p-6">
+    <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">Open Positions</h2>
+        <button onclick="window.location.reload()" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded-lg text-sm">
+            Refresh
+        </button>
+    </div>
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-gray-400 text-left border-b border-white/10">
+                    <th class="pb-3">Outcome</th>
+                    <th class="pb-3 text-right">Size</th>
+                    <th class="pb-3 text-right">Avg Price</th>
+                    <th class="pb-3 text-right">Current</th>
+                    <th class="pb-3 text-right">Cost</th>
+                    <th class="pb-3 text-right">Value</th>
+                    <th class="pb-3 text-right">P&L</th>
+                    <th class="pb-3 text-right">P&L %</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for pos in positions %}
+                <tr class="border-b border-white/5 hover:bg-white/5">
+                    <td class="py-4">
+                        <div class="font-medium">{{ pos.outcome }}</div>
+                        <div class="text-xs text-gray-500">{{ pos.token_id }}</div>
+                    </td>
+                    <td class="py-4 text-right">{{ "%.0f"|format(pos.size) }}</td>
+                    <td class="py-4 text-right">${{ "%.3f"|format(pos.avg_price) }}</td>
+                    <td class="py-4 text-right">
+                        <span class="{% if pos.cur_price > pos.avg_price %}text-green-400{% elif pos.cur_price < pos.avg_price %}text-red-400{% endif %}">
+                            ${{ "%.3f"|format(pos.cur_price) }}
+                        </span>
+                    </td>
+                    <td class="py-4 text-right">${{ "%.2f"|format(pos.cost) }}</td>
+                    <td class="py-4 text-right">${{ "%.2f"|format(pos.value) }}</td>
+                    <td class="py-4 text-right font-medium {% if pos.pnl >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                        ${{ "%+.2f"|format(pos.pnl) }}
+                    </td>
+                    <td class="py-4 text-right {% if pos.pnl_pct >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                        {{ "%+.1f"|format(pos.pnl_pct) }}%
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" class="py-12 text-center text-gray-500">
+                        <div class="text-4xl mb-4">&#128200;</div>
+                        <div>No open positions found</div>
+                        <div class="text-sm mt-2">Positions will appear here when you have active trades on Polymarket</div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+            {% if positions %}
+            <tfoot>
+                <tr class="border-t border-white/20 font-bold">
+                    <td class="py-4">Total</td>
+                    <td class="py-4 text-right">{{ positions | sum(attribute='size') | round }}</td>
+                    <td class="py-4"></td>
+                    <td class="py-4"></td>
+                    <td class="py-4 text-right">${{ "%.2f"|format(total_cost) }}</td>
+                    <td class="py-4 text-right">${{ "%.2f"|format(total_value) }}</td>
+                    <td class="py-4 text-right {% if total_pnl >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                        ${{ "%+.2f"|format(total_pnl) }}
+                    </td>
+                    <td class="py-4 text-right {% if total_pnl >= 0 %}text-green-400{% else %}text-red-400{% endif %}">
+                        {% if total_cost > 0 %}{{ "%+.1f"|format(total_pnl / total_cost * 100) }}%{% else %}-{% endif %}
+                    </td>
+                </tr>
+            </tfoot>
+            {% endif %}
+        </table>
+    </div>
+</div>
+
+<!-- Position Distribution Chart -->
+{% if positions %}
+<div class="card rounded-xl p-6 mt-6">
+    <h2 class="text-xl font-bold mb-4">Position Distribution</h2>
+    <div class="h-64">
+        <canvas id="positionChart"></canvas>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-refresh every 30 seconds
+    setTimeout(() => window.location.reload(), 30000);
+
+    {% if positions %}
+    // Position distribution pie chart
+    const positions = {{ positions | tojson | safe }};
+    new Chart(document.getElementById('positionChart'), {
+        type: 'doughnut',
+        data: {
+            labels: positions.map(p => p.outcome.substring(0, 20)),
+            datasets: [{
+                data: positions.map(p => p.value),
+                backgroundColor: [
+                    'rgba(59, 130, 246, 0.8)',
+                    'rgba(34, 197, 94, 0.8)',
+                    'rgba(239, 68, 68, 0.8)',
+                    'rgba(245, 158, 11, 0.8)',
+                    'rgba(139, 92, 246, 0.8)',
+                    'rgba(236, 72, 153, 0.8)',
+                    'rgba(20, 184, 166, 0.8)',
+                    'rgba(249, 115, 22, 0.8)',
+                ],
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'right',
+                    labels: { color: '#9ca3af' }
+                }
+            }
+        }
+    });
+    {% endif %}
+</script>
+{% endblock %}
