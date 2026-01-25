@@ -1237,14 +1237,29 @@ class TradingBot:
         Returns:
             Tuple of (executed: bool, blocked_reason: str | None)
         """
-        # Build trade request
+        # Cap position size to max_position_pct of bankroll
+        # This ensures SELL->BUY NO conversions don't get blocked due to uncapped sizes
+        max_position_size = Decimal(str(self.settings.starting_bankroll)) * Decimal(str(self.settings.max_position_pct))
+        capped_size = min(opp.suggested_size, max_position_size)
+
+        # Also ensure minimum viable size ($1)
+        if capped_size < Decimal("1"):
+            logger.debug(
+                "Position size too small after capping",
+                outcome=opp.bucket.outcome,
+                original_size=str(opp.suggested_size),
+                capped_size=str(capped_size),
+            )
+            return False, "position_size_too_small"
+
+        # Build trade request with capped size
         request = TradeRequest(
             token_id=opp.bucket.token_id,
             condition_id=opp.market.condition_id,
             outcome=opp.bucket.outcome,
             side=opp.side,
             price=opp.price,
-            size=opp.suggested_size,
+            size=capped_size,
             edge=opp.edge,
             model_agreement=opp.model_agreement,
             liquidity=opp.bucket.bid_size + opp.bucket.ask_size,
