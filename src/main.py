@@ -271,21 +271,37 @@ class TradingBot:
             for pos in positions:
                 # Skip resolved/closed positions - they shouldn't count toward position limits
                 # Polymarket data API may return positions that have already resolved
+                # Check explicit resolution indicators only
                 is_resolved = (
-                    pos.get("resolved", False) or
-                    pos.get("closed", False) or
-                    str(pos.get("status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED", "LOST", "WON") or
-                    str(pos.get("outcome_status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED", "LOST", "WON") or
-                    str(pos.get("redeemable", "")).lower() == "true" or  # Redeemable = resolved
-                    pos.get("cashoutValue", 0) != pos.get("currentValue", -1)  # Different values may indicate resolved
+                    pos.get("resolved") is True or
+                    pos.get("closed") is True or
+                    str(pos.get("status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED") or
+                    str(pos.get("outcome_status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED") or
+                    pos.get("redeemable") is True
                 )
+
+                # Also check if currentValue is 0 but we have shares - indicates resolved/worthless
+                # This catches "Lost" positions where shares are worthless
+                cur_value = pos.get("currentValue", None) or pos.get("curPrice", None)
+                size = pos.get("size", 0) or pos.get("balance", 0)
+                try:
+                    size_float = float(size) if size else 0
+                    cur_value_float = float(cur_value) if cur_value is not None else None
+                except (ValueError, TypeError):
+                    size_float = 0
+                    cur_value_float = None
+
+                # If we have shares but currentValue is 0, the position resolved worthless
+                if size_float > 0 and cur_value_float == 0:
+                    is_resolved = True
 
                 if is_resolved:
                     skipped_resolved += 1
                     logger.info(
                         "Skipped resolved/closed position",
                         outcome=pos.get("outcome", "") or pos.get("title", "") or pos.get("name", ""),
-                        status=pos.get("status", "unknown"),
+                        cur_value=cur_value,
+                        size=size,
                     )
                     continue
 
@@ -402,12 +418,26 @@ class TradingBot:
             for pos in live_positions or []:
                 # Skip resolved/closed positions
                 is_resolved = (
-                    pos.get("resolved", False) or
-                    pos.get("closed", False) or
-                    str(pos.get("status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED", "LOST", "WON") or
-                    str(pos.get("outcome_status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED", "LOST", "WON") or
-                    str(pos.get("redeemable", "")).lower() == "true"
+                    pos.get("resolved") is True or
+                    pos.get("closed") is True or
+                    str(pos.get("status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED") or
+                    str(pos.get("outcome_status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED") or
+                    pos.get("redeemable") is True
                 )
+
+                # Also check if currentValue is 0 but we have shares - indicates resolved/worthless
+                cur_value = pos.get("currentValue", None) or pos.get("curPrice", None)
+                size_raw = pos.get("size", 0) or pos.get("balance", 0)
+                try:
+                    size_float = float(size_raw) if size_raw else 0
+                    cur_value_float = float(cur_value) if cur_value is not None else None
+                except (ValueError, TypeError):
+                    size_float = 0
+                    cur_value_float = None
+
+                if size_float > 0 and cur_value_float == 0:
+                    is_resolved = True
+
                 if is_resolved:
                     continue
 
