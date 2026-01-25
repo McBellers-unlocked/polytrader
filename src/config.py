@@ -186,6 +186,7 @@ class Settings(BaseSettings):
 
     # Risk parameters
     max_position_pct: float = Field(default=0.02, ge=0, le=1)
+    max_concurrent_positions: int = Field(default=12, ge=1, le=50)
     daily_loss_stop_pct: float = Field(default=0.05, ge=0, le=1)
     max_drawdown_pct: float = Field(default=0.20, ge=0, le=1)
 

@@ -216,6 +216,7 @@ class TradingBot:
         self.risk_manager = RiskManager(
             starting_bankroll=Decimal(str(self.settings.starting_bankroll)),
             max_position_pct=self.settings.max_position_pct,
+            max_concurrent_positions=self.settings.max_concurrent_positions,
             min_edge=self.settings.min_edge_threshold,
             min_model_agreement=self.settings.min_model_agreement,
         )
