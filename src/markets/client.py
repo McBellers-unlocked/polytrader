@@ -328,6 +328,16 @@ class PolymarketClient:
                 bids = data.get("bids", [])
                 asks = data.get("asks", [])
 
+                # Debug: log raw orderbook data (temporarily INFO to diagnose)
+                logger.info(
+                    "Orderbook response",
+                    token_id=token_id[:20],
+                    n_bids=len(bids),
+                    n_asks=len(asks),
+                    best_bid_price=bids[0].get("price") if bids else None,
+                    best_ask_price=asks[0].get("price") if asks else None,
+                )
+
                 # Get best bid and ask - return None if orderbook is empty
                 best_bid = float(bids[0]["price"]) if bids else None
                 best_ask = float(asks[0]["price"]) if asks else None
