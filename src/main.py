@@ -35,6 +35,9 @@ from src.data.nowcasting import (
 )
 from src.data.tomorrow import TomorrowClient, TomorrowForecast
 
+# Resolution tracking (for ML training)
+from src.resolution.tracker import ResolutionTracker
+
 # Market scanning
 from src.markets.market_scanner import (
     MarketScanner,
@@ -229,6 +232,9 @@ class TradingBot:
         # Data persistence
         self.datastore = DataStore()
 
+        # Resolution tracker for ML training (updates predictions with actual outcomes)
+        self.resolution_tracker: ResolutionTracker | None = None  # Initialized after datastore connects
+
         # State
         self._running = False
         self._shutdown_event = asyncio.Event()
@@ -348,6 +354,9 @@ class TradingBot:
 
         # Connect to data store
         await self.datastore.connect()
+
+        # Initialize resolution tracker (needs datastore to be connected)
+        self.resolution_tracker = ResolutionTracker(self.datastore)
 
         # Load existing positions from Polymarket to prevent duplicate trades
         await self._load_existing_positions()
@@ -687,6 +696,23 @@ class TradingBot:
                 was_traded=was_traded,
                 blocked_reason=blocked_reason,
             )
+
+        # 8. Check for market resolutions (for ML training)
+        # This updates prediction records with actual outcomes from Wunderground.
+        # The tracker has internal rate limiting (every 6 hours by default).
+        if self.resolution_tracker:
+            try:
+                resolved = await self.resolution_tracker.check_resolutions()
+                if resolved > 0:
+                    logger.info(
+                        "Resolved market outcomes",
+                        resolved_count=resolved,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Resolution check failed",
+                    error=str(e),
+                )
 
         iteration.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
         return iteration
