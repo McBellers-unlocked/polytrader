@@ -230,6 +230,8 @@ class FairValueCalculator:
         token_id: str = "",
         outcome: str = "",
         current_temp: float | None = None,  # METAR observation
+        best_bid: float | None = None,  # Bid price (what we receive selling YES)
+        best_ask: float | None = None,  # Ask price (what we pay buying YES)
     ) -> FairValueResult:
         """
         Calculate fair value for a single temperature bucket.
@@ -238,11 +240,13 @@ class FairValueCalculator:
             temperatures: Array of ensemble temperature forecasts
             bucket_low: Lower bound of bucket (inclusive), None for unbounded
             bucket_high: Upper bound of bucket (exclusive), None for unbounded
-            market_price: Current YES price in market
+            market_price: Current YES price in market (fallback if bid/ask not provided)
             model_agreement: How well models agree (0-1)
             token_id: Token ID for the bucket
             outcome: Outcome string (e.g., "68-72°F")
             current_temp: Current observed temperature for nowcasting
+            best_bid: Bid price for YES token (price to sell)
+            best_ask: Ask price for YES token (price to buy)
 
         Returns:
             FairValueResult with probability and edge calculations
@@ -264,23 +268,43 @@ class FairValueCalculator:
             kde_mean = float(np.mean(temperatures))
             kde_std = float(np.std(temperatures))
 
-        # Calculate edge
-        if market_price > 0:
-            edge = (fair_prob - market_price) / market_price
-        else:
-            edge = float('inf') if fair_prob > 0 else 0
+        # Use bid/ask for proper edge calculation
+        # BUY: we pay the ask price, so edge = (fair - ask) / ask
+        # SELL: we receive the bid price, so edge = (fair - bid) / bid (will be negative)
+        buy_price = best_ask if best_ask and best_ask > 0 else market_price
+        sell_price = best_bid if best_bid and best_bid > 0 else market_price
 
-        # Calculate expected value of buying YES at market price
+        # Determine which direction has edge and use correct price
+        if fair_prob > buy_price and buy_price > 0:
+            # Potential BUY signal - calculate edge using ask (what we pay)
+            edge = (fair_prob - buy_price) / buy_price
+            execution_price = buy_price
+        elif fair_prob < sell_price and sell_price > 0:
+            # Potential SELL signal - calculate edge using bid (what we receive)
+            edge = (fair_prob - sell_price) / sell_price  # Will be negative
+            execution_price = sell_price
+        elif market_price > 0:
+            # Fair value is within the spread - no actionable edge
+            edge = 0.0
+            execution_price = market_price
+        else:
+            edge = 0.0
+            execution_price = market_price
+
+        # Calculate expected value using the execution price
         # EV = P(win) * payout - P(lose) * cost
-        # Buying YES at price p: win pays (1-p), lose costs p
-        ev = fair_prob * (1 - market_price) - (1 - fair_prob) * market_price
+        ev = fair_prob * (1 - execution_price) - (1 - fair_prob) * execution_price
 
         # Edge in dollars (per $1 bet)
-        edge_dollars = fair_prob - market_price
+        edge_dollars = fair_prob - execution_price
 
         # Confidence based on sample size and model agreement
+        # Set to 0 if no actionable edge (fair value within spread)
         sample_confidence = min(len(temperatures) / 100, 1.0)
-        confidence = model_agreement * sample_confidence
+        if edge == 0.0 and best_bid and best_ask and fair_prob >= sell_price and fair_prob <= buy_price:
+            confidence = 0.0  # No tradeable edge when inside spread
+        else:
+            confidence = model_agreement * sample_confidence
 
         return FairValueResult(
             token_id=token_id,
@@ -288,7 +312,7 @@ class FairValueCalculator:
             low_bound=bucket_low,
             high_bound=bucket_high,
             fair_probability=fair_prob,
-            market_probability=market_price,
+            market_probability=execution_price,  # Use execution price as market_probability
             edge=edge,
             edge_dollars=edge_dollars,
             expected_value=ev,
@@ -422,7 +446,8 @@ class FairValueCalculator:
         city: str,
         target_date: date,
         temperatures: NDArray[np.float64],
-        buckets: list[tuple[str, str, float | None, float | None, float]],  # (token_id, outcome, low, high, price)
+        buckets: list[tuple[str, str, float | None, float | None, float, float | None, float | None]],
+        # (token_id, outcome, low, high, price, best_bid, best_ask)
         model_agreement: float = 1.0,
         current_temp: float | None = None,
     ) -> MarketFairValue:
@@ -434,7 +459,7 @@ class FairValueCalculator:
             city: City name
             target_date: Target forecast date
             temperatures: Ensemble temperature forecasts
-            buckets: List of (token_id, outcome, low_bound, high_bound, market_price)
+            buckets: List of (token_id, outcome, low_bound, high_bound, market_price, best_bid, best_ask)
             model_agreement: Model agreement score
             current_temp: Current METAR observation
 
@@ -454,7 +479,14 @@ class FairValueCalculator:
         best_buy_edge = -float('inf')
         best_sell_edge = float('inf')
 
-        for token_id, outcome, low, high, price in buckets:
+        for bucket_data in buckets:
+            # Support both old 5-tuple and new 7-tuple formats
+            if len(bucket_data) == 5:
+                token_id, outcome, low, high, price = bucket_data
+                best_bid, best_ask = None, None
+            else:
+                token_id, outcome, low, high, price, best_bid, best_ask = bucket_data
+
             fv = self.calculate_fair_value(
                 temperatures=temperatures,
                 bucket_low=low,
@@ -464,6 +496,8 @@ class FairValueCalculator:
                 token_id=token_id,
                 outcome=outcome,
                 current_temp=current_temp,
+                best_bid=best_bid,
+                best_ask=best_ask,
             )
             result.buckets.append(fv)
             result.total_fair_probability += fv.fair_probability

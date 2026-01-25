@@ -986,8 +986,11 @@ class TradingBot:
             arbitrage_opps.append(arb)
 
         # 4. Calculate fair values for all buckets
+        # Include bid/ask prices for proper edge calculation:
+        # - BUY edge uses ask price (what we pay to buy)
+        # - SELL edge uses bid price (what we receive when selling)
         bucket_inputs = [
-            (b.token_id, b.outcome, b.low_bound, b.high_bound, b.yes_price)
+            (b.token_id, b.outcome, b.low_bound, b.high_bound, b.yes_price, b.best_bid, b.best_ask)
             for b in market.buckets
         ]
 
@@ -1060,9 +1063,21 @@ class TradingBot:
             kelly_position = float(bankroll) * half_kelly
             suggested_size = Decimal(str(round(min(kelly_position, max_position), 2)))
 
-            # Determine side
+            # Determine side and use correct orderbook price
+            # fv.market_probability now contains the correct execution price:
+            # - For BUY signals: this is the ask price
+            # - For SELL signals: this is the bid price
             side = "BUY" if fv.edge > 0 else "SELL"
-            price = Decimal(str(bucket.yes_price if side == "BUY" else (1 - bucket.yes_price)))
+            if side == "BUY":
+                # Use the execution price (ask price from edge calculation)
+                price = Decimal(str(fv.market_probability))
+            else:
+                # For SELL YES (becomes BUY NO), use NO token ask if available
+                # Otherwise calculate from YES bid: NO price ≈ 1 - YES bid
+                if bucket.no_best_ask > 0:
+                    price = Decimal(str(bucket.no_best_ask))
+                else:
+                    price = Decimal(str(1 - fv.market_probability))
 
             # Polymarket requires minimum 5 shares - ensure suggested_size is enough
             # min_dollars = 5 shares * price
