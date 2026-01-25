@@ -302,6 +302,48 @@ class PolymarketClient:
             logger.error("Failed to get positions", error=str(e))
             return []
 
+    async def get_current_price(self, token_id: str) -> float | None:
+        """
+        Fetch the current best bid/ask for a token.
+
+        Args:
+            token_id: The token to get price for
+
+        Returns:
+            Current mid price, or None if unavailable
+        """
+        if self.settings.is_paper_trading:
+            return None  # Paper trading uses cached prices
+
+        try:
+            session = await self._get_session()
+            url = f"{self.settings.polymarket_clob_url}/book"
+            params = {"token_id": token_id}
+
+            async with session.get(url, params=params, timeout=10) as response:
+                if response.status != 200:
+                    return None
+
+                data = await response.json()
+                bids = data.get("bids", [])
+                asks = data.get("asks", [])
+
+                # Get best bid and ask
+                best_bid = float(bids[0]["price"]) if bids else 0
+                best_ask = float(asks[0]["price"]) if asks else 1
+
+                if best_bid > 0 and best_ask < 1:
+                    return (best_bid + best_ask) / 2
+                elif best_bid > 0:
+                    return best_bid
+                elif best_ask < 1:
+                    return best_ask
+                return None
+
+        except Exception as e:
+            logger.debug("Failed to fetch current price", token_id=token_id[:20], error=str(e))
+            return None
+
     async def get_balance(self) -> dict[str, Decimal]:
         """
         Get account balances.

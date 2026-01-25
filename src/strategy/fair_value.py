@@ -152,6 +152,42 @@ class FairValueCalculator:
         in_range = np.sum((temps >= low) & (temps < high))
         probability = float(in_range / len(temps))
 
+        # For low-count tail buckets, use smoothed probability estimate
+        # This prevents noise from a few outlier ensemble members creating false edge
+        MIN_SAMPLE_COUNT = 4  # Need at least 4 members to trust the probability
+        if in_range < MIN_SAMPLE_COUNT and in_range > 0:
+            # Blend raw count with statistical estimate based on normal distribution
+            temp_mean = float(np.mean(temps))
+            temp_std = float(np.std(temps))
+
+            if temp_std > 0:
+                from scipy import stats
+
+                # Calculate probability from fitted normal distribution
+                if bucket.low_bound is not None and bucket.high_bound is not None:
+                    stat_prob = stats.norm.cdf(high, temp_mean, temp_std) - stats.norm.cdf(low, temp_mean, temp_std)
+                elif bucket.low_bound is None:
+                    stat_prob = stats.norm.cdf(high, temp_mean, temp_std)
+                else:
+                    stat_prob = 1 - stats.norm.cdf(low, temp_mean, temp_std)
+
+                # Blend: weight toward statistical estimate for very low counts
+                # 1 member: 80% statistical, 20% raw
+                # 3 members: 40% statistical, 60% raw
+                blend_weight = in_range / MIN_SAMPLE_COUNT  # 0.25 to 0.75
+                blended_prob = blend_weight * probability + (1 - blend_weight) * stat_prob
+
+                logger.debug(
+                    "Tail bucket smoothing applied",
+                    outcome=bucket.outcome,
+                    raw_count=int(in_range),
+                    raw_prob=f"{probability:.1%}",
+                    stat_prob=f"{stat_prob:.1%}",
+                    blended_prob=f"{blended_prob:.1%}",
+                )
+
+                probability = blended_prob
+
         # Debug logging for unusual probabilities (helps diagnose data issues)
         if probability > 0.7 or probability < 0.01:
             temp_mean = float(np.mean(temps))

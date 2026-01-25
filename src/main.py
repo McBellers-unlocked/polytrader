@@ -1252,6 +1252,39 @@ class TradingBot:
             )
             return False, "position_size_too_small"
 
+        # Price freshness check - fetch current price and compare
+        # This prevents placing orders at stale prices when market has moved
+        if self.mode != TradingMode.PAPER:
+            current_price = await self.poly_client.get_current_price(opp.bucket.token_id)
+            if current_price is not None:
+                # Calculate how much the price has moved
+                order_price = float(opp.price)
+                price_diff = abs(current_price - order_price)
+                price_move_pct = price_diff / max(order_price, 0.01)
+
+                # Skip if price moved more than 20% - edge likely gone
+                MAX_PRICE_DRIFT = 0.20
+                if price_move_pct > MAX_PRICE_DRIFT:
+                    logger.warning(
+                        "Skipping stale order - price moved significantly",
+                        outcome=opp.bucket.outcome,
+                        order_price=f"{order_price:.3f}",
+                        current_price=f"{current_price:.3f}",
+                        price_move=f"{price_move_pct:.1%}",
+                    )
+                    return False, "stale_price"
+
+                # Update order price to current market if it's close
+                # This helps orders fill instead of sitting in book
+                if price_diff > 0.005:  # More than 0.5 cents different
+                    logger.info(
+                        "Adjusting order price to current market",
+                        outcome=opp.bucket.outcome,
+                        old_price=f"{order_price:.3f}",
+                        new_price=f"{current_price:.3f}",
+                    )
+                    opp.price = Decimal(str(round(current_price, 3)))
+
         # Build trade request with capped size
         request = TradeRequest(
             token_id=opp.bucket.token_id,
