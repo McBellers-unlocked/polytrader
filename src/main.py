@@ -267,7 +267,28 @@ class TradingBot:
 
             loaded_count = 0
             skipped_dust = 0
+            skipped_resolved = 0
             for pos in positions:
+                # Skip resolved/closed positions - they shouldn't count toward position limits
+                # Polymarket data API may return positions that have already resolved
+                is_resolved = (
+                    pos.get("resolved", False) or
+                    pos.get("closed", False) or
+                    str(pos.get("status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED", "LOST", "WON") or
+                    str(pos.get("outcome_status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED", "LOST", "WON") or
+                    str(pos.get("redeemable", "")).lower() == "true" or  # Redeemable = resolved
+                    pos.get("cashoutValue", 0) != pos.get("currentValue", -1)  # Different values may indicate resolved
+                )
+
+                if is_resolved:
+                    skipped_resolved += 1
+                    logger.info(
+                        "Skipped resolved/closed position",
+                        outcome=pos.get("outcome", "") or pos.get("title", "") or pos.get("name", ""),
+                        status=pos.get("status", "unknown"),
+                    )
+                    continue
+
                 # Extract position data from Polymarket data API response
                 # Data API format: asset (token_id), size, avgPrice, currentValue, etc.
                 token_id = (
@@ -341,6 +362,7 @@ class TradingBot:
                 max_positions=self.settings.max_concurrent_positions,
                 slots_available=self.settings.max_concurrent_positions - loaded_count,
                 skipped_dust=skipped_dust,
+                skipped_resolved=skipped_resolved,
             )
 
             # Log each position individually so user can see what's counted
@@ -378,6 +400,17 @@ class TradingBot:
             active_token_ids: set[str] = set()
 
             for pos in live_positions or []:
+                # Skip resolved/closed positions
+                is_resolved = (
+                    pos.get("resolved", False) or
+                    pos.get("closed", False) or
+                    str(pos.get("status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED", "LOST", "WON") or
+                    str(pos.get("outcome_status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED", "LOST", "WON") or
+                    str(pos.get("redeemable", "")).lower() == "true"
+                )
+                if is_resolved:
+                    continue
+
                 token_id = (
                     pos.get("asset", "") or
                     pos.get("token_id", "") or
