@@ -328,16 +328,22 @@ class PolymarketClient:
                 bids = data.get("bids", [])
                 asks = data.get("asks", [])
 
-                # Get best bid and ask
-                best_bid = float(bids[0]["price"]) if bids else 0
-                best_ask = float(asks[0]["price"]) if asks else 1
+                # Get best bid and ask - return None if orderbook is empty
+                best_bid = float(bids[0]["price"]) if bids else None
+                best_ask = float(asks[0]["price"]) if asks else None
 
-                if best_bid > 0 and best_ask < 1:
+                if best_bid is not None and best_ask is not None:
                     return (best_bid + best_ask) / 2
-                elif best_bid > 0:
+                elif best_bid is not None:
                     return best_bid
-                elif best_ask < 1:
+                elif best_ask is not None:
                     return best_ask
+
+                # No orderbook data - can't determine current price
+                logger.debug(
+                    "Empty orderbook - skipping price check",
+                    token_id=token_id[:20],
+                )
                 return None
 
         except Exception as e:
