@@ -242,6 +242,7 @@ class TradingBot:
         self._paper_positions: dict[str, dict[str, Any]] = {}
         self._paper_pnl = Decimal("0")
         self._last_price_snapshot = datetime.min
+        self._last_position_refresh = datetime.min  # Track last position sync
         self._daily_stats: dict[str, Any] = {
             "opportunities": 0,
             "trades": 0,
@@ -334,6 +335,68 @@ class TradingBot:
         except Exception as e:
             logger.warning(
                 "Failed to load existing positions - will skip duplicate check for prior positions",
+                error=str(e),
+            )
+
+    async def _refresh_positions_from_polymarket(self) -> None:
+        """
+        Sync internal position state with Polymarket.
+
+        This detects when positions have resolved (been paid out) and removes
+        them from the risk manager, freeing up slots for new trades.
+        Called periodically (every 30 minutes) during operation.
+        """
+        if self.mode == TradingMode.PAPER:
+            return
+
+        try:
+            # Fetch current positions from Polymarket
+            live_positions = await self.poly_client.get_positions()
+
+            # Build set of token_ids that still have active positions
+            MIN_POSITION_VALUE = 1.0
+            active_token_ids: set[str] = set()
+
+            for pos in live_positions or []:
+                token_id = (
+                    pos.get("asset", "") or
+                    pos.get("token_id", "") or
+                    pos.get("tokenId", "") or
+                    pos.get("token", "")
+                )
+                size = float(pos.get("size", 0) or pos.get("balance", 0) or 0)
+                price = float(pos.get("price", 0) or pos.get("curPrice", 0) or pos.get("avgPrice", 0) or 0)
+
+                if token_id and size > 0 and (size * price) >= MIN_POSITION_VALUE:
+                    active_token_ids.add(token_id)
+
+            # Find positions in risk manager that no longer exist on Polymarket
+            internal_token_ids = set(self.risk_manager._positions.keys())
+            resolved_token_ids = internal_token_ids - active_token_ids
+
+            if resolved_token_ids:
+                for token_id in resolved_token_ids:
+                    pos = self.risk_manager._positions.pop(token_id, None)
+                    if pos:
+                        logger.info(
+                            "Position resolved - slot freed",
+                            outcome=pos.outcome,
+                            token_id=token_id[:20] + "...",
+                        )
+
+                logger.info(
+                    "Position refresh complete",
+                    resolved_count=len(resolved_token_ids),
+                    active_count=len(self.risk_manager._positions),
+                    max_positions=self.settings.max_concurrent_positions,
+                    slots_available=self.settings.max_concurrent_positions - len(self.risk_manager._positions),
+                )
+
+            self._last_position_refresh = datetime.utcnow()
+
+        except Exception as e:
+            logger.warning(
+                "Failed to refresh positions from Polymarket",
                 error=str(e),
             )
 
@@ -445,6 +508,13 @@ class TradingBot:
             iteration=self._iteration_count,
             mode=self.mode.value,
         )
+
+        # 0. Refresh positions from Polymarket every 30 minutes
+        # This detects resolved positions and frees up slots
+        POSITION_REFRESH_INTERVAL = 1800  # 30 minutes in seconds
+        time_since_refresh = (start_time - self._last_position_refresh).total_seconds()
+        if time_since_refresh >= POSITION_REFRESH_INTERVAL:
+            await self._refresh_positions_from_polymarket()
 
         # 1. Scan for weather markets
         markets = await self._scan_markets()
