@@ -18,13 +18,28 @@ class BucketProbability:
     Fair value probability for a temperature bucket.
 
     Calculated from ensemble weather forecast distribution.
+    Edge is calculated using the correct side of the orderbook:
+    - BUY edge uses ask price (what we pay to buy)
+    - SELL edge uses bid price (what we receive when selling)
     """
 
     bucket: TemperatureBucket
     fair_value: float  # Probability from ensemble (0-1)
-    market_price: float  # Current market YES price (0-1)
-    edge: float  # (fair_value - market_price) / market_price
+    market_price: float  # Execution price for the signal direction
+    edge: float  # Edge using correct orderbook side
     confidence: float  # Confidence in the fair value estimate
+    buy_price: float = 0.0  # Ask price (cost to BUY YES)
+    sell_price: float = 0.0  # Bid price (proceeds from SELL YES)
+
+    @property
+    def fair_probability(self) -> float:
+        """Alias for fair_value for backward compatibility."""
+        return self.fair_value
+
+    @property
+    def market_probability(self) -> float:
+        """Alias for market_price for backward compatibility."""
+        return self.market_price
 
     @property
     def has_edge(self) -> bool:
@@ -33,13 +48,27 @@ class BucketProbability:
 
     @property
     def is_buy_signal(self) -> bool:
-        """Check if this is a buy signal (underpriced)."""
+        """Check if this is a buy signal (underpriced at ask)."""
         return self.edge > 0
 
     @property
     def is_sell_signal(self) -> bool:
-        """Check if this is a sell signal (overpriced)."""
+        """Check if this is a sell signal (overpriced at bid)."""
         return self.edge < 0
+
+    @property
+    def expected_value(self) -> float:
+        """Calculate expected value per dollar wagered."""
+        # EV = (prob win * payout) - (prob lose * stake)
+        if self.is_buy_signal:
+            # Buying YES at market_price, win if outcome happens (fair_value prob)
+            # Win: fair_value * (1 - market_price)
+            # Lose: (1 - fair_value) * market_price
+            return self.fair_value * (1 - self.market_price) - (1 - self.fair_value) * self.market_price
+        elif self.is_sell_signal:
+            # Selling YES (buying NO) - win if outcome doesn't happen
+            return (1 - self.fair_value) * self.market_price - self.fair_value * (1 - self.market_price)
+        return 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -52,6 +81,8 @@ class BucketProbability:
             "market_price": self.market_price,
             "edge": self.edge,
             "confidence": self.confidence,
+            "buy_price": self.buy_price,
+            "sell_price": self.sell_price,
         }
 
 
@@ -93,18 +124,39 @@ class FairValueCalculator:
 
         for bucket in market.buckets:
             fair_value = self._calculate_bucket_probability(bucket, forecast)
-            market_price = bucket.yes_price
 
-            # Calculate edge
-            if market_price > 0:
-                edge = (fair_value - market_price) / market_price
+            # Get actual orderbook prices
+            # For BUY: we pay the ask price
+            # For SELL: we receive the bid price
+            buy_price = bucket.best_ask if bucket.best_ask > 0 else bucket.yes_price
+            sell_price = bucket.best_bid if bucket.best_bid > 0 else bucket.yes_price
+
+            # Calculate edge using the CORRECT side of the orderbook
+            # BUY edge: positive if fair_value > ask (we can buy cheap)
+            # SELL edge: negative if fair_value < bid (we can sell high)
+            if buy_price <= 0.001 and sell_price <= 0.001:
+                # No liquidity at all
+                edge = 0.0
+                market_price = bucket.yes_price
+                confidence = 0.0
+            elif fair_value > buy_price and buy_price > 0.001:
+                # Potential BUY signal - calculate edge using ask price
+                edge = (fair_value - buy_price) / buy_price
+                market_price = buy_price  # Store the execution price
+            elif fair_value < sell_price and sell_price > 0.001:
+                # Potential SELL signal - calculate edge using bid price
+                edge = (fair_value - sell_price) / sell_price  # Will be negative
+                market_price = sell_price  # Store the execution price
             else:
-                edge = float("inf") if fair_value > 0 else 0
+                # Fair value is within the spread - no actionable edge
+                edge = 0.0
+                market_price = bucket.yes_price
+                confidence = 0.0  # No tradeable edge when inside spread
 
             # Confidence is based on forecast confidence and sample size
             confidence = forecast.confidence * min(
                 len(forecast.combined_high_temps) / 50, 1.0
-            )
+            ) if edge != 0 else 0.0
 
             prob = BucketProbability(
                 bucket=bucket,
@@ -112,6 +164,8 @@ class FairValueCalculator:
                 market_price=market_price,
                 edge=edge,
                 confidence=confidence,
+                buy_price=buy_price,
+                sell_price=sell_price,
             )
 
             results.append(prob)
@@ -149,6 +203,61 @@ class FairValueCalculator:
 
         in_range = np.sum((temps >= low) & (temps < high))
         probability = float(in_range / len(temps))
+
+        # For low-count tail buckets, use smoothed probability estimate
+        # This prevents noise from a few outlier ensemble members creating false edge
+        MIN_SAMPLE_COUNT = 4  # Need at least 4 members to trust the probability
+        if in_range < MIN_SAMPLE_COUNT and in_range > 0:
+            # Blend raw count with statistical estimate based on normal distribution
+            temp_mean = float(np.mean(temps))
+            temp_std = float(np.std(temps))
+
+            if temp_std > 0:
+                from scipy import stats
+
+                # Calculate probability from fitted normal distribution
+                if bucket.low_bound is not None and bucket.high_bound is not None:
+                    stat_prob = stats.norm.cdf(high, temp_mean, temp_std) - stats.norm.cdf(low, temp_mean, temp_std)
+                elif bucket.low_bound is None:
+                    stat_prob = stats.norm.cdf(high, temp_mean, temp_std)
+                else:
+                    stat_prob = 1 - stats.norm.cdf(low, temp_mean, temp_std)
+
+                # Blend: weight toward statistical estimate for very low counts
+                # 1 member: 80% statistical, 20% raw
+                # 3 members: 40% statistical, 60% raw
+                blend_weight = in_range / MIN_SAMPLE_COUNT  # 0.25 to 0.75
+                blended_prob = blend_weight * probability + (1 - blend_weight) * stat_prob
+
+                logger.debug(
+                    "Tail bucket smoothing applied",
+                    outcome=bucket.outcome,
+                    raw_count=int(in_range),
+                    raw_prob=f"{probability:.1%}",
+                    stat_prob=f"{stat_prob:.1%}",
+                    blended_prob=f"{blended_prob:.1%}",
+                )
+
+                probability = blended_prob
+
+        # Debug logging for unusual probabilities (helps diagnose data issues)
+        if probability > 0.7 or probability < 0.01:
+            temp_mean = float(np.mean(temps))
+            temp_std = float(np.std(temps))
+            temp_min = float(np.min(temps))
+            temp_max = float(np.max(temps))
+            logger.debug(
+                "Bucket probability calculation",
+                outcome=bucket.outcome,
+                bucket_low=low,
+                bucket_high=high,
+                bucket_unit=bucket.unit,
+                probability=f"{probability:.1%}",
+                ensemble_mean=f"{temp_mean:.1f}",
+                ensemble_std=f"{temp_std:.1f}",
+                ensemble_range=f"{temp_min:.1f}-{temp_max:.1f}",
+                n_samples=len(temps),
+            )
 
         return probability
 

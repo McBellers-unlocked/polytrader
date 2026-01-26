@@ -167,14 +167,14 @@ class RiskManager:
 
     # Risk limits (can be overridden via constructor)
     MAX_POSITION_PCT = 0.02  # 2% of bankroll per position
-    MAX_CONCURRENT_POSITIONS = 5
+    MAX_CONCURRENT_POSITIONS = 12
     MAX_POSITIONS_PER_MARKET = 3
     DAILY_LOSS_LIMIT_PCT = 0.05  # 5% daily loss → 24h stop
     WEEKLY_LOSS_LIMIT_PCT = 0.10  # 10% weekly loss → 7 day stop
     MAX_DRAWDOWN_PCT = 0.20  # 20% drawdown → emergency stop
     MIN_EDGE = 0.10  # 10% minimum edge
     MIN_MODEL_AGREEMENT = 0.65  # 65% model agreement
-    MIN_LIQUIDITY = 500.0  # $500 minimum liquidity
+    MIN_LIQUIDITY = 10.0  # $10 minimum liquidity (weather markets have lower liquidity)
 
     def __init__(
         self,
@@ -631,6 +631,10 @@ class RiskManager:
     # =========================================================================
     # Position Management
     # =========================================================================
+
+    def has_position(self, token_id: str) -> bool:
+        """Check if we already have a position in this token."""
+        return token_id in self._positions
 
     def record_trade_open(self, position: Position) -> None:
         """Record opening a new position."""

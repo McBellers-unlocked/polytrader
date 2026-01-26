@@ -179,6 +179,22 @@ class EdgeDetector:
             )
             return None
 
+        # SANITY CHECK: Reject unrealistic edges (>500% is almost certainly a bug)
+        # Real market inefficiencies are rarely > 50%, and anything > 500% indicates
+        # a data issue (wrong prices, unit mismatch, etc.)
+        MAX_REALISTIC_EDGE = 5.0  # 500%
+        if abs(bp.edge) > MAX_REALISTIC_EDGE:
+            logger.warning(
+                "Rejecting unrealistic edge (likely data bug)",
+                outcome=bp.bucket.outcome,
+                edge=f"{bp.edge:.1%}",
+                fair_value=f"{bp.fair_value:.1%}",
+                market_price=f"{bp.market_price:.1%}",
+                low_bound=bp.bucket.low_bound,
+                high_bound=bp.bucket.high_bound,
+            )
+            return None
+
         # Check model agreement
         if model_agreement < self.settings.min_model_agreement:
             logger.debug(

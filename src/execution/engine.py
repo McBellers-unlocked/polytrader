@@ -101,12 +101,12 @@ class ExecutionEngine:
             )
             return None
 
-        # Adjust size based on risk
-        adjusted_size = self.risk_manager.adjust_position_size(
+        # Adjust size based on risk (in dollars)
+        adjusted_size_dollars = self.risk_manager.adjust_position_size(
             signal.suggested_size, checks
         )
 
-        if adjusted_size <= 0:
+        if adjusted_size_dollars <= 0:
             logger.info("Trade size reduced to zero", signal=signal.bucket.outcome)
             return None
 
@@ -118,13 +118,32 @@ class ExecutionEngine:
             side = OrderSide.SELL
             price = Decimal(str(1 - signal.market_price))
 
-        # Create order
+        # Convert dollars to shares (Polymarket orders are in shares, not dollars)
+        # shares = dollars / price_per_share
+        if price <= 0:
+            logger.warning("Invalid price for order", price=str(price))
+            return None
+
+        shares = adjusted_size_dollars / price
+
+        # Polymarket requires minimum $1 order value
+        # If our order is too small, skip it
+        order_value = shares * price
+        if order_value < Decimal("1"):
+            logger.info(
+                "Order value below $1 minimum, skipping",
+                outcome=signal.bucket.outcome,
+                order_value=str(order_value),
+            )
+            return None
+
+        # Create order (size is in shares)
         order = Order(
             token_id=signal.bucket.token_id,
             condition_id=signal.market.condition_id,
             side=side,
             price=price,
-            size=adjusted_size,
+            size=shares,
             signal_edge=signal.edge,
             signal_confidence=signal.confidence,
             bucket_outcome=signal.bucket.outcome,

@@ -33,6 +33,10 @@ from src.data.nowcasting import (
     TemperatureConstraint,
     create_mock_constraint,
 )
+from src.data.tomorrow import TomorrowClient, TomorrowForecast
+
+# Resolution tracking (for ML training)
+from src.resolution.tracker import ResolutionTracker
 
 # Market scanning
 from src.markets.market_scanner import (
@@ -41,6 +45,7 @@ from src.markets.market_scanner import (
     TemperatureBucket,
     create_mock_markets,
 )
+from src.markets.client import PolymarketClient, OrderSide
 
 # Strategy
 from src.strategy.probability import (
@@ -96,6 +101,10 @@ class TradingOpportunity:
 
     # Nowcasting (if applicable)
     metar_constraint: TemperatureConstraint | None = None
+
+    # BUY NO support (when SELL is converted to BUY NO)
+    is_buy_no: bool = False
+    effective_token_id: str = ""  # Token to actually trade (YES or NO)
 
     @property
     def priority_score(self) -> float:
@@ -180,8 +189,7 @@ class TradingBot:
     4. Executes trades when criteria are met
     """
 
-    # Timing
-    LOOP_INTERVAL_SECONDS = 30
+    # Timing (interval now configurable via SCAN_INTERVAL_SECONDS env var)
     MIN_HOURS_TO_RESOLUTION = 1
     MAX_HOURS_TO_RESOLUTION = 72
 
@@ -210,6 +218,8 @@ class TradingBot:
         self.arb_detector = ArbitrageDetector(min_gap=0.02)
         self.risk_manager = RiskManager(
             starting_bankroll=Decimal(str(self.settings.starting_bankroll)),
+            max_position_pct=self.settings.max_position_pct,
+            max_concurrent_positions=self.settings.max_concurrent_positions,
             min_edge=self.settings.min_edge_threshold,
             min_model_agreement=self.settings.min_model_agreement,
         )
@@ -217,8 +227,17 @@ class TradingBot:
         # METAR nowcasting for real-time constraints
         self.nowcaster = MetarNowcaster()
 
+        # Tomorrow.io client for ML-enhanced forecasts (with caching)
+        self.tomorrow_client = TomorrowClient()
+
+        # Polymarket client for order execution
+        self.poly_client = PolymarketClient()
+
         # Data persistence
         self.datastore = DataStore()
+
+        # Resolution tracker for ML training (updates predictions with actual outcomes)
+        self.resolution_tracker: ResolutionTracker | None = None  # Initialized after datastore connects
 
         # State
         self._running = False
@@ -227,6 +246,7 @@ class TradingBot:
         self._paper_positions: dict[str, dict[str, Any]] = {}
         self._paper_pnl = Decimal("0")
         self._last_price_snapshot = datetime.min
+        self._last_position_refresh = datetime.min  # Track last position sync
         self._daily_stats: dict[str, Any] = {
             "opportunities": 0,
             "trades": 0,
@@ -234,6 +254,237 @@ class TradingBot:
             "losses": 0,
             "metar_trades": 0,
         }
+
+    async def _load_existing_positions(self) -> None:
+        """Load existing positions from Polymarket to prevent duplicate trades."""
+        if self.mode == TradingMode.PAPER:
+            logger.info("Paper trading mode - skipping position load")
+            return
+
+        try:
+            positions = await self.poly_client.get_positions()
+
+            if not positions:
+                logger.info("No existing positions found on Polymarket")
+                return
+
+            loaded_count = 0
+            skipped_dust = 0
+            skipped_resolved = 0
+            for pos in positions:
+                # Skip resolved/closed positions - they shouldn't count toward position limits
+                # Polymarket data API may return positions that have already resolved
+                # Check explicit resolution indicators only
+                is_resolved = (
+                    pos.get("resolved") is True or
+                    pos.get("closed") is True or
+                    str(pos.get("status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED") or
+                    str(pos.get("outcome_status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED") or
+                    pos.get("redeemable") is True
+                )
+
+                # Also check if currentValue is 0 but we have shares - indicates resolved/worthless
+                # This catches "Lost" positions where shares are worthless
+                cur_value = pos.get("currentValue", None) or pos.get("curPrice", None)
+                size = pos.get("size", 0) or pos.get("balance", 0)
+                try:
+                    size_float = float(size) if size else 0
+                    cur_value_float = float(cur_value) if cur_value is not None else None
+                except (ValueError, TypeError):
+                    size_float = 0
+                    cur_value_float = None
+
+                # If we have shares but currentValue is 0, the position resolved worthless
+                if size_float > 0 and cur_value_float == 0:
+                    is_resolved = True
+
+                if is_resolved:
+                    skipped_resolved += 1
+                    logger.info(
+                        "Skipped resolved/closed position",
+                        outcome=pos.get("outcome", "") or pos.get("title", "") or pos.get("name", ""),
+                        cur_value=cur_value,
+                        size=size,
+                    )
+                    continue
+
+                # Extract position data from Polymarket data API response
+                # Data API format: asset (token_id), size, avgPrice, currentValue, etc.
+                token_id = (
+                    pos.get("asset", "") or
+                    pos.get("token_id", "") or
+                    pos.get("tokenId", "") or
+                    pos.get("token", "")
+                )
+                size = pos.get("size", 0) or pos.get("balance", 0) or pos.get("amount", 0)
+
+                # Skip zero or negative positions
+                try:
+                    size_float = float(size) if size else 0
+                except (ValueError, TypeError):
+                    size_float = 0
+
+                # Get price to calculate position value
+                avg_price = pos.get("avgPrice", 0) or pos.get("avg_price", 0) or pos.get("averagePrice", 0) or 0
+                cur_price = pos.get("price", 0) or pos.get("currentPrice", 0) or pos.get("curPrice", 0) or avg_price
+                try:
+                    price_float = float(cur_price) if cur_price else 0
+                except (ValueError, TypeError):
+                    price_float = 0
+
+                # Calculate position value - skip dust positions (< $1)
+                position_value = size_float * price_float
+                MIN_POSITION_VALUE = 1.0  # Ignore positions worth less than $1
+
+                if token_id and size_float > 0 and position_value >= MIN_POSITION_VALUE:
+                    # Create a Position object for the risk manager
+                    position = Position(
+                        token_id=str(token_id),
+                        condition_id=pos.get("condition_id", "") or pos.get("conditionId", "") or pos.get("marketId", "") or "",
+                        outcome=pos.get("outcome", "") or pos.get("title", "") or pos.get("name", "") or "unknown",
+                        city="unknown",  # We don't have city info from API
+                        target_date=None,
+                        size=Decimal(str(size_float)),
+                        entry_price=Decimal(str(avg_price)),
+                        current_price=Decimal(str(cur_price)),
+                        opened_at=datetime.utcnow(),
+                    )
+                    self.risk_manager._positions[token_id] = position
+                    loaded_count += 1
+                    logger.debug(
+                        "Loaded position",
+                        token_id=token_id[:20] + "...",
+                        size=size_float,
+                        outcome=position.outcome,
+                    )
+                elif token_id and size_float > 0 and position_value < MIN_POSITION_VALUE:
+                    # Dust position - skip but count it
+                    skipped_dust += 1
+                    logger.debug(
+                        "Skipped dust position",
+                        token_id=token_id[:20] + "...",
+                        value=round(position_value, 4),
+                    )
+
+            # Log all positions for visibility
+            position_details = []
+            for tid, pos in self.risk_manager._positions.items():
+                position_details.append({
+                    "outcome": pos.outcome[:30] if pos.outcome else "?",
+                    "size": float(pos.size),
+                    "value": round(float(pos.size * pos.current_price), 2),
+                })
+
+            logger.info(
+                "Loaded existing positions from Polymarket",
+                position_count=loaded_count,
+                max_positions=self.settings.max_concurrent_positions,
+                slots_available=self.settings.max_concurrent_positions - loaded_count,
+                skipped_dust=skipped_dust,
+                skipped_resolved=skipped_resolved,
+            )
+
+            # Log each position individually so user can see what's counted
+            for detail in position_details:
+                logger.info(
+                    "Position loaded",
+                    outcome=detail["outcome"],
+                    size=detail["size"],
+                    value=f"${detail['value']:.2f}",
+                )
+
+        except Exception as e:
+            logger.warning(
+                "Failed to load existing positions - will skip duplicate check for prior positions",
+                error=str(e),
+            )
+
+    async def _refresh_positions_from_polymarket(self) -> None:
+        """
+        Sync internal position state with Polymarket.
+
+        This detects when positions have resolved (been paid out) and removes
+        them from the risk manager, freeing up slots for new trades.
+        Called periodically (every 30 minutes) during operation.
+        """
+        if self.mode == TradingMode.PAPER:
+            return
+
+        try:
+            # Fetch current positions from Polymarket
+            live_positions = await self.poly_client.get_positions()
+
+            # Build set of token_ids that still have active positions
+            MIN_POSITION_VALUE = 1.0
+            active_token_ids: set[str] = set()
+
+            for pos in live_positions or []:
+                # Skip resolved/closed positions
+                is_resolved = (
+                    pos.get("resolved") is True or
+                    pos.get("closed") is True or
+                    str(pos.get("status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED") or
+                    str(pos.get("outcome_status", "")).upper() in ("RESOLVED", "CLOSED", "SETTLED") or
+                    pos.get("redeemable") is True
+                )
+
+                # Also check if currentValue is 0 but we have shares - indicates resolved/worthless
+                cur_value = pos.get("currentValue", None) or pos.get("curPrice", None)
+                size_raw = pos.get("size", 0) or pos.get("balance", 0)
+                try:
+                    size_float = float(size_raw) if size_raw else 0
+                    cur_value_float = float(cur_value) if cur_value is not None else None
+                except (ValueError, TypeError):
+                    size_float = 0
+                    cur_value_float = None
+
+                if size_float > 0 and cur_value_float == 0:
+                    is_resolved = True
+
+                if is_resolved:
+                    continue
+
+                token_id = (
+                    pos.get("asset", "") or
+                    pos.get("token_id", "") or
+                    pos.get("tokenId", "") or
+                    pos.get("token", "")
+                )
+                size = float(pos.get("size", 0) or pos.get("balance", 0) or 0)
+                price = float(pos.get("price", 0) or pos.get("curPrice", 0) or pos.get("avgPrice", 0) or 0)
+
+                if token_id and size > 0 and (size * price) >= MIN_POSITION_VALUE:
+                    active_token_ids.add(token_id)
+
+            # Find positions in risk manager that no longer exist on Polymarket
+            internal_token_ids = set(self.risk_manager._positions.keys())
+            resolved_token_ids = internal_token_ids - active_token_ids
+
+            if resolved_token_ids:
+                for token_id in resolved_token_ids:
+                    pos = self.risk_manager._positions.pop(token_id, None)
+                    if pos:
+                        logger.info(
+                            "Position resolved - slot freed",
+                            outcome=pos.outcome,
+                            token_id=token_id[:20] + "...",
+                        )
+
+                logger.info(
+                    "Position refresh complete",
+                    resolved_count=len(resolved_token_ids),
+                    active_count=len(self.risk_manager._positions),
+                    max_positions=self.settings.max_concurrent_positions,
+                    slots_available=self.settings.max_concurrent_positions - len(self.risk_manager._positions),
+                )
+
+            self._last_position_refresh = datetime.utcnow()
+
+        except Exception as e:
+            logger.warning(
+                "Failed to refresh positions from Polymarket",
+                error=str(e),
+            )
 
     async def start(self) -> None:
         """Start the trading bot."""
@@ -252,6 +503,12 @@ class TradingBot:
 
         # Connect to data store
         await self.datastore.connect()
+
+        # Initialize resolution tracker (needs datastore to be connected)
+        self.resolution_tracker = ResolutionTracker(self.datastore)
+
+        # Load existing positions from Polymarket to prevent duplicate trades
+        await self._load_existing_positions()
 
         # Start METAR nowcaster (background updates every 15 min)
         if not self.use_mock:
@@ -309,18 +566,18 @@ class TradingBot:
                     **iteration.to_dict(),
                 )
 
-                # Wait before next iteration
+                # Wait before next iteration (configurable via SCAN_INTERVAL_SECONDS)
                 try:
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
-                        timeout=self.LOOP_INTERVAL_SECONDS,
+                        timeout=self.settings.scan_interval_seconds,
                     )
                 except asyncio.TimeoutError:
                     pass
 
             except Exception as e:
                 logger.error("Error in trading loop", error=str(e), exc_info=True)
-                await asyncio.sleep(self.LOOP_INTERVAL_SECONDS)
+                await asyncio.sleep(self.settings.scan_interval_seconds)
 
     async def _run_iteration(self) -> TradingIteration:
         """Run a single trading iteration."""
@@ -337,6 +594,13 @@ class TradingBot:
             iteration=self._iteration_count,
             mode=self.mode.value,
         )
+
+        # 0. Refresh positions from Polymarket every 30 minutes
+        # This detects resolved positions and frees up slots
+        POSITION_REFRESH_INTERVAL = 1800  # 30 minutes in seconds
+        time_since_refresh = (start_time - self._last_position_refresh).total_seconds()
+        if time_since_refresh >= POSITION_REFRESH_INTERVAL:
+            await self._refresh_positions_from_polymarket()
 
         # 1. Scan for weather markets
         markets = await self._scan_markets()
@@ -426,14 +690,113 @@ class TradingBot:
         # Update daily stats
         self._daily_stats["opportunities"] += len(all_opportunities)
 
-        # 5. Sort opportunities by expected profit
-        all_opportunities.sort(key=lambda x: x.priority_score, reverse=True)
+        # 5. Filter and convert opportunities to tradeable orders
+        # - BUY opportunities: trade directly (BUY YES)
+        # - SELL opportunities: convert to BUY NO (if no_token_id available)
+        tradeable_opportunities: list[TradingOpportunity] = []
+        n_sells_converted = 0
+        n_sells_skipped = 0
+        n_penny_picking_skipped = 0  # Trades skipped due to bad risk/reward
+
+        # Maximum NO price to accept - avoid "penny in front of steamroller" trades
+        # At 90¢, you risk $0.90 to make $0.10 = 9:1 risk/reward (terrible)
+        # At 95¢, you risk $0.95 to make $0.05 = 19:1 risk/reward (awful)
+        MAX_NO_PRICE = 0.90
+        n_duplicate_skipped = 0
+
+        for opp in all_opportunities:
+            if opp.side == "BUY":
+                # BUY YES - use the YES token
+                opp.effective_token_id = opp.bucket.token_id
+                opp.is_buy_no = False
+
+                # Check if we already have a position in this token
+                if self.risk_manager.has_position(opp.effective_token_id):
+                    logger.debug(
+                        "Skipping duplicate position",
+                        outcome=opp.bucket.outcome,
+                        token_id=opp.effective_token_id[:16],
+                    )
+                    n_duplicate_skipped += 1
+                    continue
+
+                tradeable_opportunities.append(opp)
+            elif opp.side == "SELL":
+                # SELL YES opportunity - convert to BUY NO
+                no_token_id = getattr(opp.bucket, 'no_token_id', '')
+
+                # Get actual NO price from orderbook (no_best_ask is the price to BUY NO)
+                # CRITICAL: Do NOT use 1 - yes_price as fallback - on illiquid markets
+                # YES + NO prices do NOT equal $1.00! This caused orders at wrong prices.
+                no_best_ask = getattr(opp.bucket, 'no_best_ask', 0.0)
+
+                if no_best_ask > 0:
+                    # Use actual NO ask price from orderbook
+                    no_price = no_best_ask
+                else:
+                    # No orderbook data for NO token - skip this trade
+                    # We can't trust the calculated price
+                    logger.debug(
+                        "Skipping BUY NO - no orderbook data for NO token",
+                        outcome=opp.bucket.outcome,
+                        no_token_id=no_token_id[:16] if no_token_id else "none",
+                    )
+                    n_sells_skipped += 1
+                    continue
+
+                # Skip if NO price is too high (bad risk/reward)
+                # Buying NO at 99¢ means risking $0.99 to potentially make $0.01
+                if no_price > MAX_NO_PRICE:
+                    logger.info(
+                        "Skipping BUY NO - penny picking (bad risk/reward)",
+                        outcome=opp.bucket.outcome,
+                        no_price=f"${no_price:.3f}",
+                        max_allowed=f"${MAX_NO_PRICE:.2f}",
+                        risk_reward=f"{no_price/(1-no_price):.1f}:1",
+                    )
+                    n_penny_picking_skipped += 1
+                    continue
+
+                if no_token_id:
+                    # Check if we already have a position in this NO token
+                    if self.risk_manager.has_position(no_token_id):
+                        logger.debug(
+                            "Skipping duplicate NO position",
+                            outcome=opp.bucket.outcome,
+                            token_id=no_token_id[:16],
+                        )
+                        n_duplicate_skipped += 1
+                        continue
+
+                    # Convert: SELL YES at price P -> BUY NO at price (1-P)
+                    # The edge is the same magnitude but we're buying underpriced NO
+                    opp.side = "BUY"
+                    opp.price = Decimal(str(no_price))
+                    opp.effective_token_id = no_token_id
+                    opp.is_buy_no = True
+                    tradeable_opportunities.append(opp)
+                    n_sells_converted += 1
+                else:
+                    # No NO token available, skip
+                    n_sells_skipped += 1
+
+        if n_sells_converted > 0 or n_sells_skipped > 0 or n_penny_picking_skipped > 0 or n_duplicate_skipped > 0:
+            logger.info(
+                "Processed opportunities",
+                converted_to_buy_no=n_sells_converted,
+                skipped_no_token=n_sells_skipped,
+                skipped_penny_picking=n_penny_picking_skipped,
+                skipped_duplicate=n_duplicate_skipped,
+            )
+
+        # Sort by expected profit
+        tradeable_opportunities.sort(key=lambda x: x.priority_score, reverse=True)
 
         # Track trade results for each opportunity
         trade_results: dict[int, tuple[bool, str | None]] = {}
 
         # 6. Execute trades (top 3)
-        for i, opp in enumerate(all_opportunities[:3]):
+        for i, opp in enumerate(tradeable_opportunities[:3]):
             try:
                 executed, blocked_reason = await self._execute_opportunity(opp)
                 trade_results[i] = (executed, blocked_reason)
@@ -489,6 +852,23 @@ class TradingBot:
                 was_traded=was_traded,
                 blocked_reason=blocked_reason,
             )
+
+        # 8. Check for market resolutions (for ML training)
+        # This updates prediction records with actual outcomes from Wunderground.
+        # The tracker has internal rate limiting (every 6 hours by default).
+        if self.resolution_tracker:
+            try:
+                resolved = await self.resolution_tracker.check_resolutions()
+                if resolved > 0:
+                    logger.info(
+                        "Resolved market outcomes",
+                        resolved_count=resolved,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Resolution check failed",
+                    error=str(e),
+                )
 
         iteration.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
         return iteration
@@ -609,8 +989,11 @@ class TradingBot:
             arbitrage_opps.append(arb)
 
         # 4. Calculate fair values for all buckets
+        # Include bid/ask prices for proper edge calculation:
+        # - BUY edge uses ask price (what we pay to buy)
+        # - SELL edge uses bid price (what we receive when selling)
         bucket_inputs = [
-            (b.token_id, b.outcome, b.low_bound, b.high_bound, b.yes_price)
+            (b.token_id, b.outcome, b.low_bound, b.high_bound, b.yes_price, b.best_bid, b.best_ask)
             for b in market.buckets
         ]
 
@@ -624,7 +1007,15 @@ class TradingBot:
             current_temp=current_temp,
         )
 
-        # 4. Find trading opportunities
+        # 4a. Record ALL predictions for ML training (before filtering)
+        prediction_ids = await self._record_predictions(
+            market=market,
+            forecast=forecast,
+            analysis=analysis,
+            constraint=constraint,
+        )
+
+        # 4b. Find trading opportunities
         opportunities: list[TradingOpportunity] = []
         bankroll = self.risk_manager.current_bankroll
 
@@ -635,6 +1026,28 @@ class TradingBot:
             if fv.model_agreement < self.settings.min_model_agreement:
                 continue
 
+            # SANITY CHECK: Reject unrealistic edges (>500% is almost certainly a data bug)
+            # Real arbitrage opportunities are rarely > 50%
+            MAX_REALISTIC_EDGE = 5.0  # 500%
+            if abs(fv.edge) > MAX_REALISTIC_EDGE:
+                logger.warning(
+                    "REJECTING SUSPICIOUS EDGE - likely data issue",
+                    outcome=fv.outcome,
+                    edge=f"{fv.edge:.1%}",
+                    fair_prob=f"{fv.fair_probability:.1%}",
+                    market_prob=f"{fv.market_probability:.1%}",
+                    bucket_low=fv.low_bound,
+                    bucket_high=fv.high_bound,
+                    forecast_mean=f"{fv.kde_mean:.1f}",
+                )
+                print(f"\n⚠️  WARNING: Rejecting suspicious edge for {fv.outcome}")
+                print(f"   Edge: {fv.edge:.1%} (>500% suggests data bug)")
+                print(f"   Fair Value: {fv.fair_probability:.1%}")
+                print(f"   Market Price: {fv.market_probability:.1%}")
+                print(f"   Forecast Mean: {fv.kde_mean:.1f}°")
+                print(f"   Bucket: {fv.low_bound} to {fv.high_bound}")
+                continue
+
             # Find corresponding bucket
             bucket = next(
                 (b for b in market.buckets if b.token_id == fv.token_id),
@@ -643,16 +1056,38 @@ class TradingBot:
             if not bucket:
                 continue
 
-            # Calculate position size (half Kelly)
+            # Calculate position size (half Kelly, capped at max_position_pct)
             kelly = self.edge_detector.calculate_kelly_fraction(
                 fv.fair_probability,
                 fv.market_probability,
             )
-            suggested_size = Decimal(str(round(float(bankroll) * kelly * 0.5, 2)))
+            half_kelly = kelly * 0.5
+            max_position = float(bankroll) * self.settings.max_position_pct
+            kelly_position = float(bankroll) * half_kelly
+            suggested_size = Decimal(str(round(min(kelly_position, max_position), 2)))
 
-            # Determine side
+            # Determine side and use correct orderbook price
+            # fv.market_probability now contains the correct execution price:
+            # - For BUY signals: this is the ask price
+            # - For SELL signals: this is the bid price
             side = "BUY" if fv.edge > 0 else "SELL"
-            price = Decimal(str(bucket.yes_price if side == "BUY" else (1 - bucket.yes_price)))
+            if side == "BUY":
+                # Use the execution price (ask price from edge calculation)
+                price = Decimal(str(fv.market_probability))
+            else:
+                # For SELL YES (becomes BUY NO), use NO token ask if available
+                # Otherwise calculate from YES bid: NO price ≈ 1 - YES bid
+                if bucket.no_best_ask > 0:
+                    price = Decimal(str(bucket.no_best_ask))
+                else:
+                    price = Decimal(str(1 - fv.market_probability))
+
+            # Polymarket requires minimum 5 shares - ensure suggested_size is enough
+            # min_dollars = 5 shares * price
+            MIN_SHARES = Decimal("5")
+            min_dollars_for_min_shares = MIN_SHARES * price
+            if suggested_size < min_dollars_for_min_shares and suggested_size > 0:
+                suggested_size = min_dollars_for_min_shares
 
             # Create opportunity
             opp = TradingOpportunity(
@@ -689,7 +1124,7 @@ class TradingBot:
         city: CityConfig,
         target_date: date,
     ) -> EnsembleForecastResult | None:
-        """Get ensemble forecast for a city and date."""
+        """Get ensemble forecast for a city and date, enhanced with Tomorrow.io."""
         if self.use_mock:
             return create_mock_forecast(
                 lat=city.lat,
@@ -700,23 +1135,197 @@ class TradingBot:
             )
 
         try:
+            # Fetch Open-Meteo ensemble forecast (primary source)
             async with OpenMeteoClient() as client:
-                return await client.get_ensemble_forecast(
+                forecast = await client.get_ensemble_forecast(
                     lat=city.lat,
                     lon=city.lon,
                     target_date=target_date,
                     city_name=city.name,
                     convert_to_fahrenheit=(city.unit == "F"),
                 )
+
+            if forecast is None:
+                return None
+
+            # Try to enhance with Tomorrow.io (optional, cached)
+            await self._enhance_with_tomorrow(forecast, city, target_date)
+
+            return forecast
+
         except Exception as e:
-            logger.warning(f"Forecast fetch failed, using mock: {e}")
-            return create_mock_forecast(
-                lat=city.lat,
-                lon=city.lon,
-                city_name=city.name,
-                target_date=target_date,
-                convert_to_fahrenheit=(city.unit == "F"),
+            # CRITICAL: Do NOT fall back to mock data for real trading
+            # Mock data generates random temps (~55°F for all cities) which
+            # creates false edges. Skip this market instead.
+            logger.error(
+                f"Forecast fetch failed - SKIPPING MARKET (not using mock data): {e}"
             )
+            return None
+
+    async def _enhance_with_tomorrow(
+        self,
+        forecast: EnsembleForecastResult,
+        city: CityConfig,
+        target_date: date,
+    ) -> None:
+        """Enhance ensemble forecast with Tomorrow.io ML forecast."""
+        if not self.tomorrow_client.is_available:
+            return
+
+        # Maximum disagreement threshold (in forecast units)
+        # If Tomorrow.io differs by more than this, skip blending
+        MAX_DISAGREEMENT_F = 5.0  # 5°F for Fahrenheit cities
+        MAX_DISAGREEMENT_C = 3.0  # ~3°C for Celsius cities
+
+        try:
+            tomorrow = await self.tomorrow_client.get_forecast(city, target_date)
+
+            if tomorrow is None:
+                return
+
+            # Check if Tomorrow.io strongly disagrees with ensemble
+            disagreement = abs(tomorrow.high_temp - forecast.mean)
+            max_disagreement = MAX_DISAGREEMENT_F if city.unit == "F" else MAX_DISAGREEMENT_C
+
+            if disagreement > max_disagreement:
+                # Don't blend - the disagreement is too large
+                # One source is likely wrong, don't let single ML forecast override 71 members
+                logger.warning(
+                    "Tomorrow.io strongly disagrees with ensemble - skipping blend",
+                    city=city.name,
+                    target_date=str(target_date),
+                    tomorrow_high=tomorrow.high_temp,
+                    ensemble_mean=forecast.mean,
+                    disagreement=disagreement,
+                    max_allowed=max_disagreement,
+                )
+                return
+
+            # Add Tomorrow.io as synthetic ensemble members with tight spread
+            # Tomorrow.io is ML-enhanced, so use smaller std dev (~2°F)
+            tomorrow_samples = np.random.normal(
+                tomorrow.high_temp,
+                2.0,  # Tighter spread than raw NWP models
+                20,   # Add 20 synthetic members
+            )
+
+            # Blend into existing ensemble
+            original_temps = forecast.temperatures
+            forecast.temperatures = np.concatenate([original_temps, tomorrow_samples])
+
+            # Recalculate statistics with blended data
+            forecast.mean = float(np.mean(forecast.temperatures))
+            forecast.std = float(np.std(forecast.temperatures))
+            forecast.min = float(np.min(forecast.temperatures))
+            forecast.max = float(np.max(forecast.temperatures))
+            forecast.p10 = float(np.percentile(forecast.temperatures, 10))
+            forecast.p25 = float(np.percentile(forecast.temperatures, 25))
+            forecast.p50 = float(np.percentile(forecast.temperatures, 50))
+            forecast.p75 = float(np.percentile(forecast.temperatures, 75))
+            forecast.p90 = float(np.percentile(forecast.temperatures, 90))
+
+            logger.info(
+                "Enhanced forecast with Tomorrow.io",
+                city=city.name,
+                target_date=str(target_date),
+                tomorrow_high=tomorrow.high_temp,
+                ensemble_mean=round(forecast.mean, 1),
+                disagreement=round(disagreement, 1),
+                original_members=len(original_temps),
+                blended_members=len(forecast.temperatures),
+                blended_mean=forecast.mean,
+                blended_std=forecast.std,
+            )
+
+        except Exception as e:
+            # Tomorrow.io enhancement is optional - don't fail the whole forecast
+            logger.warning(
+                "Failed to enhance forecast with Tomorrow.io",
+                city=city.name,
+                error=str(e),
+            )
+
+    async def _record_predictions(
+        self,
+        market: WeatherMarket,
+        forecast: EnsembleForecastResult,
+        analysis: MarketFairValue,
+        constraint: TemperatureConstraint | None,
+    ) -> dict[str, int]:
+        """
+        Record ALL bucket predictions for ML training.
+
+        Records every bucket's model probability vs market probability,
+        not just the ones we trade. Essential for calibration analysis.
+
+        Returns:
+            Dict mapping token_id -> prediction_record_id
+        """
+        prediction_ids: dict[str, int] = {}
+
+        if not market.city or not market.target_date:
+            return prediction_ids
+
+        city = market.city
+        target_date = market.target_date
+        now = datetime.utcnow()
+
+        # Check if Tomorrow.io was blended (check if we have more than 71 members)
+        tomorrow_blended = len(forecast.temperatures) > 71
+
+        for fv in analysis.buckets:
+            # Find corresponding bucket for bounds
+            bucket = next(
+                (b for b in market.buckets if b.token_id == fv.token_id),
+                None
+            )
+
+            try:
+                pred_id = await self.datastore.save_prediction_record(
+                    timestamp=now,
+                    condition_id=market.condition_id,
+                    token_id=fv.token_id,
+                    city=city.name,
+                    target_date=target_date,
+                    outcome=fv.outcome,
+                    bucket_low=fv.low_bound,
+                    bucket_high=fv.high_bound,
+                    unit=city.unit,
+                    model_probability=fv.fair_probability,
+                    market_probability=fv.market_probability,
+                    calculated_edge=fv.edge,
+                    ensemble_mean=forecast.mean,
+                    ensemble_std=forecast.std,
+                    ensemble_n_members=len(forecast.temperatures),
+                    model_agreement=fv.model_agreement,
+                    hours_to_resolution=market.hours_until_close,
+                    ensemble_p10=forecast.p10,
+                    ensemble_p50=forecast.p50,
+                    ensemble_p90=forecast.p90,
+                    model_means=getattr(forecast, 'model_means', None),
+                    tomorrow_io_high=getattr(forecast, 'tomorrow_high', None),
+                    tomorrow_io_blended=tomorrow_blended,
+                    metar_max_temp=constraint.max_temp_observed if constraint else None,
+                    metar_hours_remaining=constraint.hours_until_close if constraint else None,
+                )
+                prediction_ids[fv.token_id] = pred_id
+
+            except Exception as e:
+                logger.warning(
+                    "Failed to save prediction record",
+                    outcome=fv.outcome,
+                    error=str(e),
+                )
+
+        if prediction_ids:
+            logger.debug(
+                "Recorded predictions for ML training",
+                city=city.name,
+                target_date=str(target_date),
+                n_predictions=len(prediction_ids),
+            )
+
+        return prediction_ids
 
     async def _execute_opportunity(
         self,
@@ -728,14 +1337,62 @@ class TradingBot:
         Returns:
             Tuple of (executed: bool, blocked_reason: str | None)
         """
-        # Build trade request
+        # Cap position size to max_position_pct of bankroll
+        # This ensures SELL->BUY NO conversions don't get blocked due to uncapped sizes
+        max_position_size = Decimal(str(self.settings.starting_bankroll)) * Decimal(str(self.settings.max_position_pct))
+        capped_size = min(opp.suggested_size, max_position_size)
+
+        # Also ensure minimum viable size ($1)
+        if capped_size < Decimal("1"):
+            logger.debug(
+                "Position size too small after capping",
+                outcome=opp.bucket.outcome,
+                original_size=str(opp.suggested_size),
+                capped_size=str(capped_size),
+            )
+            return False, "position_size_too_small"
+
+        # Price freshness check - fetch current price and compare
+        # This prevents placing orders at stale prices when market has moved
+        if self.mode != TradingMode.PAPER:
+            current_price = await self.poly_client.get_current_price(opp.bucket.token_id)
+            if current_price is not None:
+                # Calculate how much the price has moved
+                order_price = float(opp.price)
+                price_diff = abs(current_price - order_price)
+                price_move_pct = price_diff / max(order_price, 0.01)
+
+                # Skip if price moved more than 20% - edge likely gone
+                MAX_PRICE_DRIFT = 0.20
+                if price_move_pct > MAX_PRICE_DRIFT:
+                    logger.warning(
+                        "Skipping stale order - price moved significantly",
+                        outcome=opp.bucket.outcome,
+                        order_price=f"{order_price:.3f}",
+                        current_price=f"{current_price:.3f}",
+                        price_move=f"{price_move_pct:.1%}",
+                    )
+                    return False, "stale_price"
+
+                # Update order price to current market if it's close
+                # This helps orders fill instead of sitting in book
+                if price_diff > 0.005:  # More than 0.5 cents different
+                    logger.info(
+                        "Adjusting order price to current market",
+                        outcome=opp.bucket.outcome,
+                        old_price=f"{order_price:.3f}",
+                        new_price=f"{current_price:.3f}",
+                    )
+                    opp.price = Decimal(str(round(current_price, 3)))
+
+        # Build trade request with capped size
         request = TradeRequest(
             token_id=opp.bucket.token_id,
             condition_id=opp.market.condition_id,
             outcome=opp.bucket.outcome,
             side=opp.side,
             price=opp.price,
-            size=opp.suggested_size,
+            size=capped_size,
             edge=opp.edge,
             model_agreement=opp.model_agreement,
             liquidity=opp.bucket.bid_size + opp.bucket.ask_size,
@@ -917,6 +1574,20 @@ class TradingBot:
             "opened_at": datetime.utcnow().isoformat(),
         }
 
+        # Update prediction record to mark as traded (for ML training)
+        if opp.market.target_date:
+            pred = await self.datastore.get_prediction_by_token(
+                token_id=opp.bucket.token_id,
+                target_date=opp.market.target_date,
+            )
+            if pred:
+                await self.datastore.update_prediction_traded(
+                    prediction_id=pred['id'],
+                    trade_side=opp.side,
+                    trade_price=float(opp.price),
+                    trade_size=float(opp.suggested_size),
+                )
+
         # Simulate P&L (simplified: assume we win/lose based on edge direction)
         # In reality, this would track until market resolution
         simulated_pnl = Decimal(str(round(opp.expected_profit, 2)))
@@ -952,15 +1623,32 @@ class TradingBot:
         try:
             response = input("Execute this trade? [y/N]: ").strip().lower()
             if response == "y":
-                # In real implementation, this would call the exchange
-                logger.info(
-                    "[SEMI] Trade confirmed and executed",
-                    outcome=opp.bucket.outcome,
-                    side=opp.side,
-                    price=str(opp.price),
-                    size=str(opp.suggested_size),
+                # Execute the order via Polymarket client
+                order_side = OrderSide.BUY if opp.side == "BUY" else OrderSide.SELL
+                result = await self.poly_client.place_order(
+                    token_id=opp.bucket.token_id,
+                    side=order_side,
+                    price=opp.price,
+                    size=opp.suggested_size,
                 )
-                return True
+
+                if result.success:
+                    logger.info(
+                        "[SEMI] Trade confirmed and executed",
+                        outcome=opp.bucket.outcome,
+                        side=opp.side,
+                        price=str(opp.price),
+                        size=str(opp.suggested_size),
+                        order_id=result.order_id,
+                    )
+                    return True
+                else:
+                    logger.error(
+                        "[SEMI] Trade execution failed",
+                        outcome=opp.bucket.outcome,
+                        error=result.message,
+                    )
+                    return False
             else:
                 logger.info(
                     "[SEMI] Trade rejected by user",
@@ -977,27 +1665,103 @@ class TradingBot:
         request: TradeRequest,
     ) -> bool:
         """Execute an automatic trade."""
+        # Convert dollars to shares (Polymarket orders are in shares, not dollars)
+        # suggested_size is in dollars, we need shares = dollars / price
+        if opp.price <= 0:
+            logger.warning("Invalid price for order", price=str(opp.price))
+            return False
+
+        shares = opp.suggested_size / opp.price
+
+        # Polymarket requires minimum $1 order value AND minimum 5 shares
+        order_value = shares * opp.price
+        MIN_SHARES = Decimal("5")
+        if order_value < Decimal("1"):
+            logger.info(
+                "[AUTO] Order value below $1 minimum, skipping",
+                outcome=opp.bucket.outcome,
+                order_value=str(order_value),
+            )
+            return False
+
+        if shares < MIN_SHARES:
+            logger.info(
+                "[AUTO] Share count below 5 minimum, skipping",
+                outcome=opp.bucket.outcome,
+                shares=str(shares),
+            )
+            return False
+
+        # Determine the token to trade (YES token or NO token)
+        token_to_trade = opp.effective_token_id or opp.bucket.token_id
+        trade_type = "BUY_NO" if opp.is_buy_no else "BUY_YES"
+
         logger.info(
             "[AUTO] Executing trade",
             outcome=opp.bucket.outcome,
-            side=opp.side,
+            trade_type=trade_type,
             price=str(opp.price),
-            size=str(opp.suggested_size),
+            size_dollars=str(opp.suggested_size),
+            size_shares=str(shares),
         )
 
-        # TODO: Implement actual order execution via PolymarketClient
-        # For now, log as if executed
-        logger.info(
-            "[AUTO] Trade executed",
-            city=opp.market.city.name if opp.market.city else "unknown",
-            outcome=opp.bucket.outcome,
-            side=opp.side,
-            price=str(opp.price),
-            size=str(opp.suggested_size),
-            edge=opp.edge,
+        # Execute the order via Polymarket client
+        order_side = OrderSide.BUY if opp.side == "BUY" else OrderSide.SELL
+        result = await self.poly_client.place_order(
+            token_id=token_to_trade,
+            side=order_side,
+            price=opp.price,
+            size=shares,
         )
 
-        return True
+        if result.success:
+            logger.info(
+                "[AUTO] Trade executed",
+                city=opp.market.city.name if opp.market.city else "unknown",
+                outcome=opp.bucket.outcome,
+                trade_type=trade_type,
+                price=str(opp.price),
+                size=str(opp.suggested_size),
+                edge=opp.edge,
+                order_id=result.order_id,
+            )
+
+            # Record the position so we don't repeat the same trade
+            position = Position(
+                token_id=token_to_trade,
+                condition_id=opp.market.condition_id,
+                outcome=opp.bucket.outcome,
+                city=opp.market.city.name if opp.market.city else "unknown",
+                target_date=opp.market.target_date,
+                size=shares,
+                entry_price=opp.price,
+                current_price=opp.price,
+                opened_at=datetime.utcnow(),
+            )
+            self.risk_manager.record_trade_open(position)
+
+            # Update prediction record to mark as traded (for ML training)
+            if opp.market.target_date:
+                pred = await self.datastore.get_prediction_by_token(
+                    token_id=opp.bucket.token_id,
+                    target_date=opp.market.target_date,
+                )
+                if pred:
+                    await self.datastore.update_prediction_traded(
+                        prediction_id=pred['id'],
+                        trade_side=trade_type,
+                        trade_price=float(opp.price),
+                        trade_size=float(opp.suggested_size),
+                    )
+
+            return True
+        else:
+            logger.error(
+                "[AUTO] Trade execution failed",
+                outcome=opp.bucket.outcome,
+                error=result.message,
+            )
+            return False
 
     def get_status(self) -> dict[str, Any]:
         """Get current bot status."""

@@ -11,6 +11,10 @@ from src.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Cache TTL in seconds - refresh Tomorrow.io data every 180s to stay within free tier (500/day)
+# 16 markets × (86400s / 180s) = ~480 calls/day
+CACHE_TTL_SECONDS = 180
+
 
 @dataclass
 class TomorrowForecast:
@@ -44,10 +48,9 @@ class TomorrowForecast:
 
 class TomorrowClient:
     """
-    Client for Tomorrow.io API.
+    Client for Tomorrow.io API with caching.
 
-    Free tier allows 500 requests/day, which is sufficient for
-    hourly updates across 7 cities.
+    Caches forecasts for 180 seconds to stay within free tier (500 calls/day).
     """
 
     def __init__(self, session: aiohttp.ClientSession | None = None):
@@ -55,6 +58,8 @@ class TomorrowClient:
         self.settings = get_settings()
         self._session = session
         self._owns_session = session is None
+        # Cache: {(city_key, target_date_str): (fetch_time, forecast)}
+        self._cache: dict[tuple[str, str], tuple[datetime, TomorrowForecast]] = {}
 
     @property
     def is_available(self) -> bool:
@@ -73,13 +78,41 @@ class TomorrowClient:
             await self._session.close()
             self._session = None
 
+    def _get_cache_key(self, city: CityConfig, target_date: date) -> tuple[str, str]:
+        """Generate cache key for a forecast."""
+        # Use city name as key since CityConfig isn't hashable
+        return (city.name, target_date.isoformat())
+
+    def _get_cached(self, city: CityConfig, target_date: date) -> TomorrowForecast | None:
+        """Get cached forecast if still valid."""
+        key = self._get_cache_key(city, target_date)
+        if key in self._cache:
+            fetch_time, forecast = self._cache[key]
+            age_seconds = (datetime.utcnow() - fetch_time).total_seconds()
+            if age_seconds < CACHE_TTL_SECONDS:
+                logger.debug(
+                    "Using cached Tomorrow.io forecast",
+                    city=city.name,
+                    target_date=str(target_date),
+                    age_seconds=int(age_seconds),
+                )
+                return forecast
+        return None
+
+    def _set_cached(self, city: CityConfig, target_date: date, forecast: TomorrowForecast) -> None:
+        """Cache a forecast."""
+        key = self._get_cache_key(city, target_date)
+        self._cache[key] = (datetime.utcnow(), forecast)
+
     async def get_forecast(
         self,
         city: CityConfig,
         target_date: date,
     ) -> TomorrowForecast | None:
         """
-        Fetch forecast from Tomorrow.io.
+        Fetch forecast from Tomorrow.io with caching.
+
+        Caches forecasts for 180s to stay within free tier.
 
         Args:
             city: City configuration
@@ -91,6 +124,11 @@ class TomorrowClient:
         if not self.is_available:
             logger.debug("Tomorrow.io API key not configured, skipping")
             return None
+
+        # Check cache first
+        cached = self._get_cached(city, target_date)
+        if cached is not None:
+            return cached
 
         session = await self._get_session()
 
@@ -134,7 +172,10 @@ class TomorrowClient:
                     return None
 
                 data = await response.json()
-                return self._parse_response(data, city, target_date)
+                forecast = self._parse_response(data, city, target_date)
+                if forecast is not None:
+                    self._set_cached(city, target_date, forecast)
+                return forecast
 
         except aiohttp.ClientError as e:
             logger.warning("Tomorrow.io request failed", error=str(e))

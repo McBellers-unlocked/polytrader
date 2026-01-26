@@ -367,24 +367,25 @@ class RiskManager:
         """Check market liquidity."""
         spread = signal.bucket.spread
 
-        # Block if spread is too wide (>10%)
-        if spread > 0.10:
+        # For weather markets, spreads can be wider due to lower liquidity
+        # Block only if spread is extremely wide (>25%)
+        if spread > 0.25:
             return RiskCheck(
                 name="liquidity",
                 status=RiskStatus.BLOCKED,
                 message=f"Spread {spread:.2%} too wide",
                 current_value=spread,
-                limit_value=0.10,
+                limit_value=0.25,
             )
 
-        # Warning if spread is concerning (>5%)
-        if spread > 0.05:
+        # Warning if spread is concerning (>15%)
+        if spread > 0.15:
             return RiskCheck(
                 name="liquidity",
                 status=RiskStatus.WARNING,
                 message="Wide spread, may have slippage",
                 current_value=spread,
-                limit_value=0.10,
+                limit_value=0.25,
             )
 
         return RiskCheck(
@@ -392,7 +393,7 @@ class RiskManager:
             status=RiskStatus.OK,
             message="Liquidity OK",
             current_value=spread,
-            limit_value=0.10,
+            limit_value=0.25,
         )
 
     def get_status(self) -> dict[str, Any]:

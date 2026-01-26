@@ -13,6 +13,11 @@ from src.logging import get_logger
 
 logger = get_logger(__name__)
 
+# Open-Meteo Ensemble API endpoints
+# Free tier uses ensemble-api, paid plans use customer-ensemble-api
+ENSEMBLE_API_URL_FREE = "https://ensemble-api.open-meteo.com/v1/ensemble"
+ENSEMBLE_API_URL_PAID = "https://customer-ensemble-api.open-meteo.com/v1/ensemble"
+
 
 @dataclass
 class EnsembleForecast:
@@ -222,7 +227,7 @@ class OpenMeteoClient:
         model: str,
     ) -> tuple[NDArray[np.float64] | None, list[float]]:
         """Fetch forecast from a single ensemble model."""
-        params = {
+        params: dict[str, Any] = {
             "latitude": city.lat,
             "longitude": city.lon,
             "daily": "temperature_2m_max",
@@ -232,7 +237,13 @@ class OpenMeteoClient:
             "timezone": "UTC",
         }
 
-        url = self.settings.open_meteo_url
+        # Use paid API URL if API key is configured
+        if self.settings.open_meteo_api_key:
+            url = ENSEMBLE_API_URL_PAID
+            params["apikey"] = self.settings.open_meteo_api_key
+        else:
+            url = ENSEMBLE_API_URL_FREE
+
         async with session.get(url, params=params, timeout=30) as response:
             if response.status != 200:
                 text = await response.text()

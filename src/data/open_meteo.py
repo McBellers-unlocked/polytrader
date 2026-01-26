@@ -17,13 +17,15 @@ import aiohttp
 import numpy as np
 from numpy.typing import NDArray
 
-from src.config import CityConfig, CITIES
+from src.config import CityConfig, CITIES, get_settings
 from src.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Open-Meteo Ensemble API endpoint
-ENSEMBLE_API_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
+# Open-Meteo Ensemble API endpoints
+# Free tier uses ensemble-api, paid plans use customer-ensemble-api
+ENSEMBLE_API_URL_FREE = "https://ensemble-api.open-meteo.com/v1/ensemble"
+ENSEMBLE_API_URL_PAID = "https://customer-ensemble-api.open-meteo.com/v1/ensemble"
 
 # Models to query - each provides multiple ensemble members
 ENSEMBLE_MODELS = [
@@ -169,6 +171,7 @@ class OpenMeteoClient:
         self._session = session
         self._owns_session = session is None
         self.models = models or ENSEMBLE_MODELS
+        self.settings = get_settings()
 
     async def __aenter__(self) -> "OpenMeteoClient":
         """Async context manager entry."""
@@ -291,8 +294,15 @@ class OpenMeteoClient:
             "timezone": "UTC",
         }
 
+        # Use paid API URL and add key if configured
+        if self.settings.open_meteo_api_key:
+            api_url = ENSEMBLE_API_URL_PAID
+            params["apikey"] = self.settings.open_meteo_api_key
+        else:
+            api_url = ENSEMBLE_API_URL_FREE
+
         async with self._session.get(
-            ENSEMBLE_API_URL,
+            api_url,
             params=params,
             timeout=aiohttp.ClientTimeout(total=30),
         ) as response:

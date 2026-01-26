@@ -9,6 +9,7 @@ from datetime import datetime, date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+import math
 
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -19,6 +20,7 @@ from src.config import get_settings, CITIES, TradingMode
 from src.execution.datastore import DataStore
 from src.risk.risk_manager import RiskManager
 from src.main import TradingBot
+from src.markets.client import PolymarketClient
 
 # Paths
 BASE_DIR = Path(__file__).parent
@@ -121,6 +123,176 @@ async def get_dashboard_data() -> dict[str, Any]:
     }
 
 
+async def get_ml_analytics_data() -> dict[str, Any]:
+    """Get ML training analytics data."""
+    datastore = DataStore()
+    await datastore.connect()
+
+    try:
+        today = date.today()
+        week_ago = today - timedelta(days=7)
+        month_ago = today - timedelta(days=30)
+
+        # Get resolved predictions for calibration analysis
+        resolved = await datastore.get_resolved_predictions(
+            start_date=month_ago,
+            end_date=today,
+        )
+
+        # Get unresolved predictions (pending)
+        unresolved = await datastore.get_unresolved_predictions(before_date=today)
+
+        # Calculate calibration buckets (10% increments)
+        calibration = []
+        for i in range(10):
+            low = i * 0.1
+            high = (i + 1) * 0.1
+            bucket_preds = [
+                p for p in resolved
+                if low <= p.get("model_probability", 0) < high
+            ]
+            if bucket_preds:
+                n_correct = sum(1 for p in bucket_preds if p.get("prediction_correct"))
+                actual_rate = n_correct / len(bucket_preds)
+                calibration.append({
+                    "bucket": f"{int(low*100)}-{int(high*100)}%",
+                    "midpoint": (low + high) / 2,
+                    "count": len(bucket_preds),
+                    "correct": n_correct,
+                    "actual_rate": actual_rate,
+                    "expected_rate": (low + high) / 2,
+                    "calibration_error": abs(actual_rate - (low + high) / 2),
+                })
+
+        # Edge vs win rate analysis
+        edge_buckets = []
+        for edge_low in [0.10, 0.15, 0.20, 0.30, 0.50]:
+            edge_high = edge_low + 0.10 if edge_low < 0.50 else 1.0
+            bucket_preds = [
+                p for p in resolved
+                if p.get("was_traded") and edge_low <= abs(p.get("calculated_edge", 0)) < edge_high
+            ]
+            if bucket_preds:
+                n_correct = sum(1 for p in bucket_preds if p.get("prediction_correct"))
+                total_pnl = sum(p.get("trade_pnl", 0) or 0 for p in bucket_preds)
+                edge_buckets.append({
+                    "bucket": f"{int(edge_low*100)}%+",
+                    "count": len(bucket_preds),
+                    "win_rate": n_correct / len(bucket_preds) * 100,
+                    "total_pnl": total_pnl,
+                    "avg_pnl": total_pnl / len(bucket_preds) if bucket_preds else 0,
+                })
+
+        # City performance
+        city_stats = {}
+        for p in resolved:
+            city = p.get("city", "Unknown")
+            if city not in city_stats:
+                city_stats[city] = {"total": 0, "correct": 0, "traded": 0, "pnl": 0}
+            city_stats[city]["total"] += 1
+            if p.get("prediction_correct"):
+                city_stats[city]["correct"] += 1
+            if p.get("was_traded"):
+                city_stats[city]["traded"] += 1
+                city_stats[city]["pnl"] += p.get("trade_pnl", 0) or 0
+
+        city_performance = [
+            {
+                "city": city,
+                "predictions": stats["total"],
+                "accuracy": stats["correct"] / stats["total"] * 100 if stats["total"] > 0 else 0,
+                "trades": stats["traded"],
+                "pnl": stats["pnl"],
+            }
+            for city, stats in city_stats.items()
+        ]
+        city_performance.sort(key=lambda x: x["predictions"], reverse=True)
+
+        # Recent predictions (last 50)
+        recent_predictions = sorted(
+            resolved + unresolved,
+            key=lambda x: x.get("timestamp", ""),
+            reverse=True
+        )[:50]
+
+        # Summary stats
+        total_predictions = len(resolved) + len(unresolved)
+        resolved_count = len(resolved)
+        if resolved:
+            overall_accuracy = sum(1 for p in resolved if p.get("prediction_correct")) / len(resolved) * 100
+            traded_preds = [p for p in resolved if p.get("was_traded")]
+            total_pnl = sum(p.get("trade_pnl", 0) or 0 for p in traded_preds)
+        else:
+            overall_accuracy = 0
+            total_pnl = 0
+
+    finally:
+        await datastore.close()
+
+    return {
+        "total_predictions": total_predictions,
+        "resolved_count": resolved_count,
+        "pending_count": len(unresolved),
+        "overall_accuracy": overall_accuracy,
+        "total_pnl": total_pnl,
+        "calibration": calibration,
+        "edge_buckets": edge_buckets,
+        "city_performance": city_performance,
+        "recent_predictions": recent_predictions,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+async def get_live_positions_data() -> dict[str, Any]:
+    """Get live position data from Polymarket."""
+    positions = []
+    total_value = 0
+    total_cost = 0
+
+    try:
+        client = PolymarketClient()
+        raw_positions = await client.get_positions()
+
+        for pos in raw_positions:
+            size = float(pos.get("size", 0) or 0)
+            avg_price = float(pos.get("avgPrice", 0) or 0)
+            cur_price = float(pos.get("price", 0) or pos.get("curPrice", 0) or avg_price)
+
+            if size <= 0:
+                continue
+
+            cost = size * avg_price
+            value = size * cur_price
+            pnl = value - cost
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0
+
+            positions.append({
+                "token_id": pos.get("asset", "")[:16] + "...",
+                "outcome": pos.get("title", pos.get("outcome", "Unknown")),
+                "size": size,
+                "avg_price": avg_price,
+                "cur_price": cur_price,
+                "cost": cost,
+                "value": value,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+            })
+
+            total_value += value
+            total_cost += cost
+
+    except Exception as e:
+        pass  # Will return empty list
+
+    return {
+        "positions": positions,
+        "total_value": total_value,
+        "total_cost": total_cost,
+        "total_pnl": total_value - total_cost,
+        "position_count": len(positions),
+    }
+
+
 # =============================================================================
 # Web Routes
 # =============================================================================
@@ -162,6 +334,28 @@ async def opportunities_page(request: Request):
     return templates.TemplateResponse(
         "opportunities.html",
         {"request": request, **data}
+    )
+
+
+@app.get("/analytics", response_class=HTMLResponse)
+async def analytics_page(request: Request):
+    """ML Analytics page."""
+    data = await get_dashboard_data()
+    ml_data = await get_ml_analytics_data()
+    return templates.TemplateResponse(
+        "analytics.html",
+        {"request": request, **data, **ml_data}
+    )
+
+
+@app.get("/live", response_class=HTMLResponse)
+async def live_positions_page(request: Request):
+    """Live Polymarket positions page."""
+    data = await get_dashboard_data()
+    live_data = await get_live_positions_data()
+    return templates.TemplateResponse(
+        "live.html",
+        {"request": request, **data, **live_data}
     )
 
 
@@ -210,6 +404,35 @@ async def api_opportunities():
     finally:
         await datastore.close()
     return JSONResponse({"opportunities": opps[:50]})
+
+
+@app.get("/api/analytics")
+async def api_analytics():
+    """Get ML analytics data."""
+    data = await get_ml_analytics_data()
+    return JSONResponse(data)
+
+
+@app.get("/api/live-positions")
+async def api_live_positions():
+    """Get live Polymarket positions."""
+    data = await get_live_positions_data()
+    return JSONResponse(data)
+
+
+@app.get("/api/predictions")
+async def api_predictions(resolved: bool = False, traded: bool = False):
+    """Get prediction records."""
+    datastore = DataStore()
+    await datastore.connect()
+    try:
+        if resolved:
+            preds = await datastore.get_resolved_predictions(traded_only=traded)
+        else:
+            preds = await datastore.get_unresolved_predictions()
+    finally:
+        await datastore.close()
+    return JSONResponse({"predictions": preds[:100]})
 
 
 @app.post("/api/bot/start")

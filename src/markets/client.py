@@ -71,22 +71,31 @@ class PolymarketClient:
         if self._clob_client is None and self.settings.is_live_trading:
             try:
                 from py_clob_client.client import ClobClient
-                from py_clob_client.clob_types import ApiCreds
 
-                # Initialize with credentials
+                # Initialize client with POLY_PROXY signature type (1)
+                # This is required when using Polymarket proxy wallets
+                # Signature types: 0=EOA, 1=POLY_PROXY, 2=GNOSIS_SAFE
                 self._clob_client = ClobClient(
                     host=self.settings.polymarket_clob_url,
                     chain_id=137,  # Polygon
                     key=self.settings.polymarket_private_key,
-                    creds=ApiCreds(
-                        api_key=self.settings.polymarket_api_key,
-                        api_secret="",
-                        api_passphrase="",
-                    ) if self.settings.polymarket_api_key else None,
+                    funder=self.settings.polymarket_funder,
+                    signature_type=1,  # POLY_PROXY for Polymarket proxy wallets
+                )
+
+                # Derive and set API credentials from private key
+                self._clob_client.set_api_creds(self._clob_client.derive_api_key())
+
+                logger.info(
+                    "CLOB client initialized with POLY_PROXY signature type",
                     funder=self.settings.polymarket_funder,
                 )
+
             except ImportError:
                 logger.warning("py-clob-client not installed, using paper trading")
+                self._clob_client = None
+            except Exception as e:
+                logger.error(f"Failed to initialize CLOB client: {e}")
                 self._clob_client = None
 
         return self._clob_client
@@ -121,13 +130,18 @@ class PolymarketClient:
             return self._simulate_order(token_id, side, price, size)
 
         try:
-            # Build and sign the order
-            order = clob.create_order(
+            from py_clob_client.clob_types import OrderArgs, OrderType as ClobOrderType
+
+            # Build order args for py-clob-client
+            order_args = OrderArgs(
                 token_id=token_id,
                 price=float(price),
                 size=float(size),
                 side=side.value,
             )
+
+            # Create and sign the order
+            order = clob.create_order(order_args)
 
             # Submit the order
             response = clob.post_order(order)
@@ -149,17 +163,36 @@ class PolymarketClient:
             )
 
         except Exception as e:
+            error_str = str(e)
+
+            # Check for Cloudflare block
+            if "403" in error_str and ("cloudflare" in error_str.lower() or "blocked" in error_str.lower()):
+                logger.error(
+                    "CLOUDFLARE BLOCK: Your IP is blocked by Polymarket's firewall. "
+                    "This typically happens when running from datacenter IPs. "
+                    "Options: 1) Run from residential network, 2) Use residential proxy, "
+                    "3) Contact Polymarket about API access.",
+                    token_id=token_id,
+                    side=side.value,
+                )
+                return OrderResponse(
+                    order_id="",
+                    success=False,
+                    status="CLOUDFLARE_BLOCKED",
+                    message="IP blocked by Cloudflare. Run from residential network or use proxy.",
+                )
+
             logger.error(
                 "Order placement failed",
                 token_id=token_id,
                 side=side.value,
-                error=str(e),
+                error=error_str[:200],  # Truncate long error messages
             )
             return OrderResponse(
                 order_id="",
                 success=False,
                 status="ERROR",
-                message=str(e),
+                message=error_str[:200],
             )
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -223,10 +256,10 @@ class PolymarketClient:
 
     async def get_positions(self) -> list[dict[str, Any]]:
         """
-        Get current positions.
+        Get current positions from Polymarket data API.
 
         Returns:
-            List of position dicts
+            List of position dicts with 'asset' (token_id) and 'size' fields
         """
         if self.settings.is_paper_trading:
             return []
@@ -236,10 +269,101 @@ class PolymarketClient:
             return []
 
         try:
-            return clob.get_positions()
+            # Use the funder address (proxy wallet) - this is where positions are held
+            # The signer address from get_address() is different from where positions live
+            address = self.settings.polymarket_funder
+            if not address:
+                address = clob.get_address()
+
+            # Query the Polymarket data API for positions
+            session = await self._get_session()
+            url = f"https://data-api.polymarket.com/positions?user={address}"
+
+            logger.debug("Fetching positions", url=url, address=address)
+
+            async with session.get(url, timeout=30) as response:
+                if response.status != 200:
+                    logger.warning(
+                        "Failed to fetch positions from data API",
+                        status=response.status,
+                        address=address,
+                    )
+                    return []
+
+                positions = await response.json()
+                logger.info(
+                    "Fetched positions from Polymarket",
+                    count=len(positions) if positions else 0,
+                    address=address[:10] + "..." if address else "none",
+                )
+                return positions if positions else []
+
         except Exception as e:
             logger.error("Failed to get positions", error=str(e))
             return []
+
+    async def get_current_price(self, token_id: str) -> float | None:
+        """
+        Fetch the current best bid/ask for a token.
+
+        Args:
+            token_id: The token to get price for
+
+        Returns:
+            Current mid price, or None if unavailable
+        """
+        if self.settings.is_paper_trading:
+            return None  # Paper trading uses cached prices
+
+        try:
+            session = await self._get_session()
+            url = f"{self.settings.polymarket_clob_url}/book"
+            params = {"token_id": token_id}
+
+            async with session.get(url, params=params, timeout=10) as response:
+                if response.status != 200:
+                    return None
+
+                data = await response.json()
+                bids = data.get("bids", [])
+                asks = data.get("asks", [])
+
+                # Get best bid and ask - return None if orderbook is empty
+                best_bid = float(bids[0]["price"]) if bids else None
+                best_ask = float(asks[0]["price"]) if asks else None
+
+                # Check if spread is too wide to determine meaningful price
+                # Wide spreads (e.g., bid=0.01, ask=0.99) give meaningless mid-prices
+                if best_bid is not None and best_ask is not None:
+                    spread = best_ask - best_bid
+                    MAX_USEFUL_SPREAD = 0.30  # 30 cents spread max
+
+                    if spread > MAX_USEFUL_SPREAD:
+                        logger.debug(
+                            "Orderbook spread too wide - skipping price check",
+                            token_id=token_id[:20],
+                            best_bid=best_bid,
+                            best_ask=best_ask,
+                            spread=spread,
+                        )
+                        return None
+
+                    return (best_bid + best_ask) / 2
+                elif best_bid is not None:
+                    return best_bid
+                elif best_ask is not None:
+                    return best_ask
+
+                # No orderbook data - can't determine current price
+                logger.debug(
+                    "Empty orderbook - skipping price check",
+                    token_id=token_id[:20],
+                )
+                return None
+
+        except Exception as e:
+            logger.debug("Failed to fetch current price", token_id=token_id[:20], error=str(e))
+            return None
 
     async def get_balance(self) -> dict[str, Decimal]:
         """
