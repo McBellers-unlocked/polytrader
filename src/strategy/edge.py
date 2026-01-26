@@ -179,10 +179,11 @@ class EdgeDetector:
             )
             return None
 
-        # SANITY CHECK: Reject unrealistic edges (>500% is almost certainly a bug)
-        # Real market inefficiencies are rarely > 50%, and anything > 500% indicates
-        # a data issue (wrong prices, unit mismatch, etc.)
-        MAX_REALISTIC_EDGE = 5.0  # 500%
+        # SANITY CHECK: Reject unrealistic edges (>100% is almost certainly a bug)
+        # Real market inefficiencies are rarely > 50%, and anything > 100% indicates
+        # a data issue (wrong prices, unit mismatch, stale orderbook, etc.)
+        # Previous trades with 200%+ edges had -4% P&L, confirming these aren't real.
+        MAX_REALISTIC_EDGE = 1.0  # 100%
         if abs(bp.edge) > MAX_REALISTIC_EDGE:
             logger.warning(
                 "Rejecting unrealistic edge (likely data bug)",
@@ -210,6 +211,19 @@ class EdgeDetector:
                 "Skipping signal due to low confidence",
                 outcome=bp.bucket.outcome,
                 confidence=bp.confidence,
+            )
+            return None
+
+        # Avoid long-shot bets: require minimum 10% fair value
+        # Betting on <10% probability outcomes is essentially lottery tickets
+        # with high variance and poor expected bankroll growth
+        MIN_FAIR_VALUE = 0.10  # 10%
+        if bp.fair_value < MIN_FAIR_VALUE:
+            logger.debug(
+                "Skipping long-shot bet (fair value too low)",
+                outcome=bp.bucket.outcome,
+                fair_value=f"{bp.fair_value:.1%}",
+                market_price=f"{bp.market_price:.1%}",
             )
             return None
 
