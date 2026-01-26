@@ -63,6 +63,9 @@ from src.risk.risk_manager import (
 # Data persistence
 from src.execution.datastore import DataStore
 
+# Session management
+from src.execution.sessions import get_session_manager, TradingSession
+
 # CLI dashboard
 from src.cli.dashboard import Dashboard
 
@@ -1123,6 +1126,115 @@ async def analyze_market(city: str, use_mock: bool = False) -> None:
     print(f"\n{'='*60}")
 
 
+async def session_new(name: str, bankroll: float, notes: str = "") -> None:
+    """Start a new trading session."""
+    settings = get_settings()
+    manager = get_session_manager()
+
+    # Close current session if active
+    if manager.current_session:
+        print(f"Closing current session: {manager.current_session.name}")
+        manager.close_current_session(
+            notes="Closed to start new session"
+        )
+
+    # Start new session with current settings
+    session = manager.start_new_session(
+        name=name,
+        starting_bankroll=bankroll,
+        min_edge_threshold=settings.min_edge_threshold,
+        min_confidence=settings.min_confidence,
+        max_positions=settings.max_total_positions,
+        notes=notes,
+    )
+
+    print("\n" + "=" * 60)
+    print("🆕 NEW TRADING SESSION STARTED")
+    print("=" * 60)
+    print(f"  Session ID: {session.session_id}")
+    print(f"  Name: {session.name}")
+    print(f"  Started: {session.started_at.strftime('%Y-%m-%d %H:%M')}")
+    print(f"  Bankroll: ${session.starting_bankroll:.2f}")
+    print(f"\n  Settings:")
+    print(f"    Min Edge: {session.min_edge_threshold:.0%}")
+    print(f"    Min Confidence: {session.min_confidence:.0%}")
+    print(f"    Max Positions: {session.max_positions}")
+    if notes:
+        print(f"\n  Notes: {notes}")
+    print("=" * 60)
+    print("\n✅ Old positions are now archived. Starting fresh!")
+
+
+async def session_close(
+    total_trades: int = 0,
+    winning_trades: int = 0,
+    total_pnl: float = 0.0,
+    total_cost: float = 0.0,
+    notes: str = "",
+) -> None:
+    """Close the current trading session."""
+    manager = get_session_manager()
+
+    if not manager.current_session:
+        print("❌ No active session to close.")
+        return
+
+    session = manager.close_current_session(
+        total_trades=total_trades,
+        winning_trades=winning_trades,
+        total_pnl=total_pnl,
+        total_cost=total_cost,
+        notes=notes,
+    )
+
+    print("\n" + "=" * 60)
+    print("📦 SESSION ARCHIVED")
+    print("=" * 60)
+    print(f"  Session: {session.name} ({session.session_id})")
+    print(f"  Duration: {session.duration_days:.1f} days")
+    print(f"  Trades: {session.total_trades}")
+    print(f"  Win Rate: {session.win_rate:.1%}")
+    print(f"  P&L: ${session.total_pnl:+.2f} ({session.return_pct:.1%})")
+    print("=" * 60)
+
+
+async def session_list() -> None:
+    """List all trading sessions."""
+    manager = get_session_manager()
+
+    print(manager.compare_sessions())
+
+
+async def session_status() -> None:
+    """Show current session status."""
+    manager = get_session_manager()
+
+    if not manager.current_session:
+        print("\n❌ No active session.")
+        print("   Start one with: python -m src.main session new 'Session Name' --bankroll 100")
+        return
+
+    session = manager.current_session
+    print("\n" + "=" * 60)
+    print("🟢 CURRENT SESSION")
+    print("=" * 60)
+    print(f"  Session ID: {session.session_id}")
+    print(f"  Name: {session.name}")
+    print(f"  Started: {session.started_at.strftime('%Y-%m-%d %H:%M')}")
+    print(f"  Duration: {session.duration_days:.1f} days")
+    print(f"\n  Settings:")
+    print(f"    Min Edge: {session.min_edge_threshold:.0%}")
+    print(f"    Min Confidence: {session.min_confidence:.0%}")
+    print(f"    Max Positions: {session.max_positions}")
+    print(f"\n  Performance:")
+    print(f"    Trades: {session.total_trades}")
+    print(f"    Win Rate: {session.win_rate:.1%}")
+    print(f"    P&L: ${session.total_pnl:+.2f} ({session.return_pct:.1%})")
+    if session.notes:
+        print(f"\n  Notes: {session.notes}")
+    print("=" * 60)
+
+
 async def show_status() -> None:
     """Show current risk and position status."""
     setup_logging()
@@ -1131,6 +1243,14 @@ async def show_status() -> None:
         starting_bankroll=Decimal(str(get_settings().starting_bankroll))
     )
     status = risk.get_status()
+
+    # Also show session status
+    manager = get_session_manager()
+    if manager.current_session:
+        print("\n" + "=" * 60)
+        print(f"📊 Current Session: {manager.current_session.name}")
+        print(f"   Started: {manager.current_session.started_at.strftime('%Y-%m-%d')}")
+        print("=" * 60)
 
     print("\n" + "=" * 60)
     print("POLYTRADER STATUS")
@@ -1221,6 +1341,84 @@ Examples:
     # Status command
     subparsers.add_parser("status", help="Show current status")
 
+    # Session command
+    session_parser = subparsers.add_parser(
+        "session",
+        help="Manage trading sessions",
+    )
+    session_subparsers = session_parser.add_subparsers(
+        dest="session_command",
+        help="Session command",
+    )
+
+    # session new
+    session_new_parser = session_subparsers.add_parser(
+        "new",
+        help="Start a new trading session (archives old positions)",
+    )
+    session_new_parser.add_argument(
+        "name",
+        help="Name for the session (e.g., 'v2-tighter-params')",
+    )
+    session_new_parser.add_argument(
+        "--bankroll", "-b",
+        type=float,
+        default=100.0,
+        help="Starting bankroll for this session (default: 100)",
+    )
+    session_new_parser.add_argument(
+        "--notes", "-n",
+        default="",
+        help="Notes about this session",
+    )
+
+    # session close
+    session_close_parser = session_subparsers.add_parser(
+        "close",
+        help="Close the current session and archive it",
+    )
+    session_close_parser.add_argument(
+        "--trades", "-t",
+        type=int,
+        default=0,
+        help="Total trades in session",
+    )
+    session_close_parser.add_argument(
+        "--wins", "-w",
+        type=int,
+        default=0,
+        help="Winning trades",
+    )
+    session_close_parser.add_argument(
+        "--pnl",
+        type=float,
+        default=0.0,
+        help="Total P&L",
+    )
+    session_close_parser.add_argument(
+        "--cost",
+        type=float,
+        default=0.0,
+        help="Total cost basis",
+    )
+    session_close_parser.add_argument(
+        "--notes", "-n",
+        default="",
+        help="Notes about session close",
+    )
+
+    # session list
+    session_subparsers.add_parser(
+        "list",
+        help="List all trading sessions",
+    )
+
+    # session status (default)
+    session_subparsers.add_parser(
+        "status",
+        help="Show current session status",
+    )
+
     # Dashboard command
     dashboard_parser = subparsers.add_parser(
         "dashboard",
@@ -1277,6 +1475,17 @@ Examples:
         asyncio.run(analyze_market(args.city, use_mock=args.mock))
     elif args.command == "status":
         asyncio.run(show_status())
+    elif args.command == "session":
+        if args.session_command == "new":
+            asyncio.run(session_new(args.name, args.bankroll, args.notes))
+        elif args.session_command == "close":
+            asyncio.run(session_close(
+                args.trades, args.wins, args.pnl, args.cost, args.notes
+            ))
+        elif args.session_command == "list":
+            asyncio.run(session_list())
+        else:
+            asyncio.run(session_status())
     elif args.command == "dashboard":
         asyncio.run(show_dashboard(
             positions=args.positions,
