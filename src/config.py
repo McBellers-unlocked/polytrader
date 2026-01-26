@@ -153,8 +153,17 @@ class Settings(BaseSettings):
     max_drawdown_pct: float = Field(default=0.20, ge=0, le=1)
 
     # Edge thresholds
-    min_edge_threshold: float = Field(default=0.10, ge=0, le=1)
+    min_edge_threshold: float = Field(default=0.15, ge=0, le=1)  # Increased from 0.10
     min_model_agreement: float = Field(default=0.65, ge=0, le=1)
+    min_confidence: float = Field(default=0.50, ge=0, le=1)  # New: minimum confidence
+
+    # Liquidity requirements
+    max_spread_pct: float = Field(default=0.10, ge=0, le=1)  # Max 10% bid-ask spread
+    min_liquidity_usd: float = Field(default=100.0, ge=0)  # Min $100 liquidity
+
+    # Position limits
+    max_positions_per_market: int = Field(default=3, ge=1)  # Focus bets
+    max_total_positions: int = Field(default=15, ge=1)  # Avoid over-diversification
 
     # Order execution
     order_timeout_seconds: int = Field(default=60, ge=1)
