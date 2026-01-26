@@ -295,6 +295,10 @@ class MarketScanner:
         # Filter and parse weather markets
         weather_markets: list[WeatherMarket] = []
         for raw in raw_markets:
+            # Skip non-dict items (API sometimes returns strings)
+            if not isinstance(raw, dict):
+                logger.warning(f"Skipping non-dict market item: {type(raw).__name__}")
+                continue
             market = self._parse_market(raw)
             if market is None:
                 continue
