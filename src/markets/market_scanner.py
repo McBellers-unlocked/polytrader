@@ -341,7 +341,16 @@ class MarketScanner:
                 if response.status == 200:
                     data = await response.json()
                     if isinstance(data, list):
-                        all_markets.extend(data)
+                        # Only add dict items (API sometimes returns strings)
+                        for item in data:
+                            if isinstance(item, dict):
+                                all_markets.append(item)
+                    elif isinstance(data, dict):
+                        # Some APIs wrap results in a dict
+                        items = data.get("data", data.get("markets", data.get("results", [])))
+                        for item in items:
+                            if isinstance(item, dict):
+                                all_markets.append(item)
                     logger.debug(f"Fetched {len(all_markets)} markets with weather tag")
 
             # Also fetch without tag and filter ourselves (backup)
@@ -358,15 +367,22 @@ class MarketScanner:
             ) as response:
                 if response.status == 200:
                     data = await response.json()
+                    items = []
                     if isinstance(data, list):
-                        # Add markets not already in list
-                        existing_ids = {m.get("conditionId") for m in all_markets}
-                        for m in data:
-                            if m.get("conditionId") not in existing_ids:
-                                # Quick filter for weather-related
-                                question = (m.get("question", "") + m.get("description", "")).lower()
-                                if any(kw in question for kw in ["temperature", "weather", "degrees", "°f", "°c"]):
-                                    all_markets.append(m)
+                        items = data
+                    elif isinstance(data, dict):
+                        items = data.get("data", data.get("markets", data.get("results", [])))
+
+                    # Add markets not already in list
+                    existing_ids = {m.get("conditionId") for m in all_markets if isinstance(m, dict)}
+                    for m in items:
+                        if not isinstance(m, dict):
+                            continue
+                        if m.get("conditionId") not in existing_ids:
+                            # Quick filter for weather-related
+                            question = (m.get("question", "") + m.get("description", "")).lower()
+                            if any(kw in question for kw in ["temperature", "weather", "degrees", "°f", "°c"]):
+                                all_markets.append(m)
 
             logger.info(f"Total markets to process: {len(all_markets)}")
 
