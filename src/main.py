@@ -209,6 +209,11 @@ class TradingBot:
         self.mode = mode
         self.use_mock = use_mock
 
+        # CRITICAL: Sync command-line mode to settings singleton
+        # The PolymarketClient checks settings.is_paper_trading, not self.mode
+        # Without this, --mode auto still executes paper trades!
+        self.settings.trading_mode = mode
+
         # Initialize components
         self.fair_value_calc = FairValueCalculator()
         self.edge_detector = EdgeDetector(
