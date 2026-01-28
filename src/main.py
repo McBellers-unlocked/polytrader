@@ -908,6 +908,21 @@ class TradingBot:
         city = market.city
         target = market.target_date
 
+        # FILTER: Only trade same-day or next-day markets
+        # Weather forecasts are most accurate 0-24 hours out
+        # Beyond 2 days, ensemble spread is too wide for reliable edge
+        MAX_DAYS_AHEAD = 1  # 0 = today, 1 = tomorrow
+        days_ahead = (target - date.today()).days
+        if days_ahead > MAX_DAYS_AHEAD:
+            logger.debug(
+                "Skipping market - too far in future",
+                city=city.name,
+                target_date=target.isoformat(),
+                days_ahead=days_ahead,
+                max_days=MAX_DAYS_AHEAD,
+            )
+            return [], []
+
         logger.debug(
             "Processing market",
             city=city.name,
