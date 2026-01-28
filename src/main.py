@@ -1095,6 +1095,49 @@ class TradingBot:
                 )
                 continue
 
+            # FILTER: Never buy NO at high prices (same penny-picking trap)
+            # If NO costs 80¢, you risk 80¢ to win 20¢ - terrible risk/reward
+            # Jan 28 analysis showed buying NO at 82-85¢ on likely outcomes = losses
+            MAX_NO_PRICE = 0.70  # 70% - same limit as YES
+            if fv.edge < 0:  # Negative edge = SELL YES = BUY NO
+                no_price = 1 - fv.market_probability  # NO price ≈ 1 - YES price
+                if no_price > MAX_NO_PRICE:
+                    logger.debug(
+                        "Skipping expensive NO (bad risk/reward)",
+                        outcome=fv.outcome,
+                        no_price=f"{no_price:.1%}",
+                    )
+                    continue
+
+            # FILTER: Don't bet against buckets near the forecast mean
+            # If forecast mean is 44°F and bucket is 44-45°F, don't buy NO!
+            # Only buy NO on buckets that are far from the expected temperature
+            if fv.edge < 0:  # BUY NO signal
+                bucket_mid = (fv.low_bound + fv.high_bound) / 2
+                distance_from_mean = abs(bucket_mid - fv.kde_mean)
+                MIN_DISTANCE_FOR_NO = 3.0  # Must be 3+ degrees away from mean
+                if distance_from_mean < MIN_DISTANCE_FOR_NO:
+                    logger.debug(
+                        "Skipping NO bet - bucket too close to forecast mean",
+                        outcome=fv.outcome,
+                        bucket_mid=bucket_mid,
+                        forecast_mean=f"{fv.kde_mean:.1f}",
+                        distance=f"{distance_from_mean:.1f}",
+                    )
+                    continue
+
+                # FILTER: Only buy NO if the outcome is actually unlikely
+                # If fair_value is 25%+, the outcome has decent chance - don't bet against it
+                MAX_FAIR_VALUE_FOR_NO = 0.20  # Only bet NO if outcome <20% likely
+                if fv.fair_probability > MAX_FAIR_VALUE_FOR_NO:
+                    logger.debug(
+                        "Skipping NO bet - outcome too likely",
+                        outcome=fv.outcome,
+                        fair_prob=f"{fv.fair_probability:.1%}",
+                        max_for_no=f"{MAX_FAIR_VALUE_FOR_NO:.0%}",
+                    )
+                    continue
+
             # Find corresponding bucket
             bucket = next(
                 (b for b in market.buckets if b.token_id == fv.token_id),
