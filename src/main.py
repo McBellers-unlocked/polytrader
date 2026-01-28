@@ -514,10 +514,12 @@ class TradingBot:
         if not self.use_mock:
             await self.nowcaster.start()
 
-        # Set up signal handlers
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, self._handle_shutdown)
+        # Set up signal handlers (Unix only - Windows doesn't support this)
+        import sys
+        if sys.platform != "win32":
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, self._handle_shutdown)
 
         try:
             await self._run_loop()
