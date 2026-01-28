@@ -1028,9 +1028,11 @@ class TradingBot:
             if fv.model_agreement < self.settings.min_model_agreement:
                 continue
 
-            # SANITY CHECK: Reject unrealistic edges (>500% is almost certainly a data bug)
-            # Real arbitrage opportunities are rarely > 50%
-            MAX_REALISTIC_EDGE = 5.0  # 500%
+            # SANITY CHECK: Reject unrealistic edges (>100% is almost certainly a data bug)
+            # Real arbitrage opportunities are rarely > 50%, and anything > 100% indicates
+            # stale orderbook data, unit mismatches, or API errors
+            # Previous analysis showed trades with 200%+ edges had -4% P&L
+            MAX_REALISTIC_EDGE = 1.0  # 100%
             if abs(fv.edge) > MAX_REALISTIC_EDGE:
                 logger.warning(
                     "REJECTING SUSPICIOUS EDGE - likely data issue",
@@ -1043,11 +1045,34 @@ class TradingBot:
                     forecast_mean=f"{fv.kde_mean:.1f}",
                 )
                 print(f"\n⚠️  WARNING: Rejecting suspicious edge for {fv.outcome}")
-                print(f"   Edge: {fv.edge:.1%} (>500% suggests data bug)")
+                print(f"   Edge: {fv.edge:.1%} (>100% suggests data bug)")
                 print(f"   Fair Value: {fv.fair_probability:.1%}")
                 print(f"   Market Price: {fv.market_probability:.1%}")
                 print(f"   Forecast Mean: {fv.kde_mean:.1f}°")
                 print(f"   Bucket: {fv.low_bound} to {fv.high_bound}")
+                continue
+
+            # FILTER: Avoid long-shot bets (fair value < 10%)
+            # Betting on <10% probability outcomes has high variance and poor expected growth
+            MIN_FAIR_VALUE = 0.10  # 10%
+            if fv.fair_probability < MIN_FAIR_VALUE:
+                logger.debug(
+                    "Skipping long-shot bet",
+                    outcome=fv.outcome,
+                    fair_prob=f"{fv.fair_probability:.1%}",
+                )
+                continue
+
+            # FILTER: Never buy YES at high prices (penny-picking trap)
+            # Jan 24 trades showed buying YES at $0.95+ with 0% prob = guaranteed loss
+            # Max 70% ensures decent risk/reward (risk $0.70 to win $0.30)
+            MAX_BUY_PRICE = 0.70  # 70%
+            if fv.edge > 0 and fv.market_probability > MAX_BUY_PRICE:
+                logger.debug(
+                    "Skipping expensive YES (bad risk/reward)",
+                    outcome=fv.outcome,
+                    market_prob=f"{fv.market_probability:.1%}",
+                )
                 continue
 
             # Find corresponding bucket
