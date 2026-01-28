@@ -1,6 +1,7 @@
 """Edge detection and trade signal generation."""
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -120,6 +121,22 @@ class EdgeDetector:
         """
         signals: list[TradeSignal] = []
 
+        # LEAD TIME FILTER: Only trade on markets resolving within 36 hours
+        # Analysis showed: Jan 26 forecasts (1 day) were accurate, Jan 27 (2+ days) mostly lost
+        # Forecasts degrade significantly beyond 24-36 hours
+        MAX_DAYS_AHEAD = 1  # Only same-day and next-day markets
+        if market.target_date:
+            days_ahead = (market.target_date - date.today()).days
+            if days_ahead > MAX_DAYS_AHEAD:
+                logger.debug(
+                    "Skipping market - too far ahead for reliable forecast",
+                    city=market.city_key,
+                    target_date=str(market.target_date),
+                    days_ahead=days_ahead,
+                    max_days=MAX_DAYS_AHEAD,
+                )
+                return []
+
         for bp in bucket_probs:
             signal = self._evaluate_bucket(market, bp, model_agreement, bankroll)
             if signal:
@@ -224,6 +241,30 @@ class EdgeDetector:
                 outcome=bp.bucket.outcome,
                 fair_value=f"{bp.fair_value:.1%}",
                 market_price=f"{bp.market_price:.1%}",
+            )
+            return None
+
+        # CRITICAL: Never buy YES at high prices (penny-picking trap)
+        # Jan 24 trades showed buying YES at $0.95+ with 0% probability = guaranteed loss
+        # Max 70% ensures decent risk/reward (risk $0.70 to win $0.30)
+        MAX_BUY_PRICE = 0.70  # 70%
+        if bp.market_price > MAX_BUY_PRICE:
+            logger.debug(
+                "Skipping expensive YES position (bad risk/reward)",
+                outcome=bp.bucket.outcome,
+                market_price=f"{bp.market_price:.1%}",
+                max_allowed=f"{MAX_BUY_PRICE:.0%}",
+            )
+            return None
+
+        # CRITICAL: Require minimum positive edge before proceeding
+        # This is a safety check - edge should be positive for BUY YES
+        if bp.edge < self.settings.min_edge_threshold:
+            logger.debug(
+                "Skipping signal - edge below threshold",
+                outcome=bp.bucket.outcome,
+                edge=f"{bp.edge:.1%}",
+                threshold=f"{self.settings.min_edge_threshold:.1%}",
             )
             return None
 
