@@ -1095,6 +1095,50 @@ class TradingBot:
                 )
                 continue
 
+            # FILTER: Minimum entry price for YES bets (avoid penny stock long-shots)
+            # Trade analysis showed many losses from 5-10¢ YES bets on unlikely buckets
+            # These have high "edge" but rarely hit - the tails are too uncertain
+            MIN_YES_PRICE = 0.08  # 8% - bucket must be reasonably probable
+            if fv.edge > 0 and fv.market_probability < MIN_YES_PRICE:
+                logger.debug(
+                    "Skipping cheap YES (penny stock long-shot)",
+                    outcome=fv.outcome,
+                    market_prob=f"{fv.market_probability:.1%}",
+                    min_required=f"{MIN_YES_PRICE:.0%}",
+                )
+                continue
+
+            # FILTER: YES bets must be within 3°F of forecast mean
+            # CRITICAL INSIGHT from trade analysis: WINNING YES bets were on buckets
+            # NEAR the forecast mean (e.g., Atlanta 44-45°F when mean was ~44°F)
+            # LOSING YES bets were on buckets FAR from mean (cheap long-shots)
+            MAX_DISTANCE_FOR_YES = 3.0  # Must be within 3°F of forecast mean
+            if fv.edge > 0:  # BUY YES signal
+                bucket_mid = (fv.low_bound + fv.high_bound) / 2
+                distance_from_mean = abs(bucket_mid - fv.kde_mean)
+                if distance_from_mean > MAX_DISTANCE_FOR_YES:
+                    logger.debug(
+                        "Skipping YES bet - bucket too far from forecast mean",
+                        outcome=fv.outcome,
+                        bucket_mid=f"{bucket_mid:.1f}",
+                        forecast_mean=f"{fv.kde_mean:.1f}",
+                        distance=f"{distance_from_mean:.1f}",
+                        max_distance=MAX_DISTANCE_FOR_YES,
+                    )
+                    continue
+
+            # FILTER: Disable NO bets entirely (trade analysis showed -76.5% P&L)
+            # NO bets are complex: you're betting the bucket WON'T hit, but
+            # the bot was buying NO on buckets that WERE near the forecast mean
+            # Until YES bet logic is profitable, disable NO bets completely
+            DISABLE_NO_BETS = True  # Set to False to re-enable NO bets
+            if DISABLE_NO_BETS and fv.edge < 0:
+                logger.debug(
+                    "Skipping NO bet (NO bets disabled due to poor performance)",
+                    outcome=fv.outcome,
+                )
+                continue
+
             # FILTER: Never buy NO at high prices (same penny-picking trap)
             # If NO costs 80¢, you risk 80¢ to win 20¢ - terrible risk/reward
             # Jan 28 analysis showed buying NO at 82-85¢ on likely outcomes = losses
