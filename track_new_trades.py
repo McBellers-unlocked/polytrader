@@ -1,74 +1,130 @@
-"""Track P&L for trades made after a specific date (when new filters were applied)."""
+"""Track P&L for trades including realized wins from activity history."""
 
 import asyncio
 import aiohttp
 from datetime import datetime, timezone
-
-# Set this to when you deployed the new filters
-FILTER_DEPLOY_DATE = "2025-01-30T00:00:00Z"  # Adjust this date
+from collections import defaultdict
 
 
-async def track_trades():
+async def fetch_full_pnl():
+    """Fetch both positions AND activity to get complete P&L picture."""
     address = '0x12b065A1232b26Af79dB55b9e71F5cffEBCaCD23'
-    cutoff = datetime.fromisoformat(FILTER_DEPLOY_DATE.replace('Z', '+00:00'))
 
     async with aiohttp.ClientSession() as session:
-        # Fetch activity (trades)
-        url = f'https://data-api.polymarket.com/activity?user={address}&limit=200'
-        async with session.get(url) as resp:
+        # Fetch current positions (open trades)
+        pos_url = f'https://data-api.polymarket.com/positions?user={address}'
+        async with session.get(pos_url) as resp:
+            positions = await resp.json()
+
+        # Fetch activity history (includes claims, buys, sells)
+        act_url = f'https://data-api.polymarket.com/activity?user={address}&limit=500'
+        async with session.get(act_url) as resp:
             activity = await resp.json()
 
-    # Filter to weather trades only
     weather_keywords = ['temperature', 'highest', '°F', '°C']
 
-    old_trades = []
-    new_trades = []
+    print("=" * 80)
+    print("COMPLETE P&L ANALYSIS (Positions + Realized)")
+    print("=" * 80)
 
-    for trade in activity:
-        title = trade.get('title', '') or trade.get('market', '') or ''
+    # Track realized P&L from activity
+    realized_wins = []
+    realized_losses = []
+    buys = []
+
+    for act in activity:
+        title = act.get('title', '') or act.get('description', '') or ''
         if not any(kw.lower() in title.lower() for kw in weather_keywords):
             continue
 
-        # Parse timestamp
-        timestamp_str = trade.get('timestamp') or trade.get('createdAt') or ''
-        if timestamp_str:
-            try:
-                ts = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                is_new = ts >= cutoff
-            except:
-                is_new = False
-        else:
-            is_new = False
+        act_type = act.get('type', '').lower()
+        value = float(act.get('value', 0) or act.get('usdcSize', 0) or 0)
+        price = float(act.get('price', 0) or 0)
+        size = float(act.get('size', 0) or 0)
 
-        trade_info = {
-            'title': title[:60],
-            'type': trade.get('type', ''),
-            'side': trade.get('side', ''),
-            'outcome': trade.get('outcome', ''),
-            'price': float(trade.get('price', 0) or 0),
-            'size': float(trade.get('size', 0) or 0),
-            'value': float(trade.get('value', 0) or 0),
-            'timestamp': timestamp_str,
-        }
+        if act_type in ['claim', 'redeem', 'claimed']:
+            # This is a WIN - market resolved in our favor
+            realized_wins.append({
+                'title': title[:55],
+                'value': value if value > 0 else size,  # payout amount
+                'type': act_type,
+            })
+        elif act_type in ['sell', 'sold']:
+            # Sold position - could be profit or loss
+            realized_wins.append({
+                'title': title[:55],
+                'value': value,
+                'type': 'sell',
+            })
+        elif act_type in ['buy', 'bought']:
+            buys.append({
+                'title': title[:55],
+                'cost': value if value > 0 else (size * price),
+                'price': price,
+            })
+        elif act_type in ['lost', 'loss']:
+            realized_losses.append({
+                'title': title[:55],
+                'type': 'lost',
+            })
 
-        if is_new:
-            new_trades.append(trade_info)
-        else:
-            old_trades.append(trade_info)
+    # Calculate realized P&L
+    total_wins = sum(w['value'] for w in realized_wins)
+    total_bought = sum(b['cost'] for b in buys)
 
+    print(f"\n📈 REALIZED WINS (Claims + Sells):")
+    print("-" * 60)
+    for w in realized_wins:
+        print(f"  +${w['value']:.2f} | {w['type']:6} | {w['title']}")
+    print(f"  TOTAL REALIZED WINS: ${total_wins:.2f}")
+
+    print(f"\n📉 TOTAL SPENT ON BUYS: ${total_bought:.2f}")
+
+    # Current open positions
+    print(f"\n📊 CURRENT OPEN POSITIONS:")
+    print("-" * 60)
+
+    open_cost = 0
+    open_value = 0
+    for pos in positions:
+        title = pos.get('title', '') or ''
+        if not any(kw.lower() in title.lower() for kw in weather_keywords):
+            continue
+
+        outcome = pos.get('outcome', '')
+        size = float(pos.get('size', 0) or 0)
+        avg_price = float(pos.get('avgPrice', 0) or 0)
+        cur_price = float(pos.get('curPrice', 0) or 0)
+
+        cost = size * avg_price
+        value = size * cur_price
+        pnl = value - cost
+
+        open_cost += cost
+        open_value += value
+
+        status = "+" if pnl >= 0 else ""
+        print(f"  {outcome:3} @ {avg_price*100:5.1f}¢ → {cur_price*100:5.1f}¢ | {status}${pnl:.2f} | {title[:45]}")
+
+    print(f"\n  Open positions cost: ${open_cost:.2f}")
+    print(f"  Open positions value: ${open_value:.2f}")
+    print(f"  Open positions P&L: ${open_value - open_cost:.2f}")
+
+    # Summary
+    print(f"\n{'='*80}")
+    print("SUMMARY")
     print("=" * 80)
-    print(f"TRADE TRACKING - Cutoff: {FILTER_DEPLOY_DATE}")
-    print("=" * 80)
+    print(f"  Total spent (buys): ${total_bought:.2f}")
+    print(f"  Total realized (wins/sells): ${total_wins:.2f}")
+    print(f"  Open position value: ${open_value:.2f}")
+    print(f"  ")
+    net_pnl = total_wins + open_value - total_bought
+    print(f"  NET P&L: ${net_pnl:.2f}")
 
-    print(f"\n📊 OLD TRADES (before filters): {len(old_trades)}")
-    print(f"📊 NEW TRADES (after filters): {len(new_trades)}")
 
-    if new_trades:
-        print(f"\n{'='*80}")
-        print("NEW TRADES (after filter deployment)")
-        print("=" * 80)
-        for t in new_trades:
-            print(f"  {t['type']:8} | {t['outcome']:3} @ {t['price']*100:.0f}¢ | {t['title']}")
+async def track_trades():
+    """Legacy function - redirects to full P&L analysis."""
+    await fetch_full_pnl()
 
 
 async def analyze_from_positions():
@@ -167,4 +223,4 @@ async def analyze_from_positions():
 
 
 if __name__ == "__main__":
-    asyncio.run(analyze_from_positions())
+    asyncio.run(fetch_full_pnl())
