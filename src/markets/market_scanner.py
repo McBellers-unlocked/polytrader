@@ -488,7 +488,12 @@ class MarketScanner:
             target_date_str = event.get("_target_date", "")
             slug = event.get("_slug", "")
 
+            # Debug: Log what we're trying to parse
+            event_title = event.get("title", "")[:50]
+            logger.info(f"Parsing event: city_key={city_key}, slug={slug}, title={event_title}")
+
             if not city_key or city_key not in CITIES:
+                logger.info(f"Skipping event - invalid city_key: {city_key}, available: {list(CITIES.keys())[:5]}...")
                 return None
 
             city = CITIES[city_key]
@@ -530,6 +535,8 @@ class MarketScanner:
 
             # Parse each sub-market into a temperature bucket
             sub_markets = event.get("markets", [])
+            logger.info(f"Event has {len(sub_markets)} sub-markets to parse")
+
             for sub_market in sub_markets:
                 if not isinstance(sub_market, dict):
                     continue
@@ -537,6 +544,9 @@ class MarketScanner:
                 bucket = self._parse_sub_market_to_bucket(sub_market, city)
                 if bucket:
                     market.buckets.append(bucket)
+                else:
+                    sub_q = sub_market.get("question", "")[:40]
+                    logger.debug(f"Failed to parse bucket: {sub_q}")
                     # Accumulate volume/liquidity
                     market.volume += float(sub_market.get("volume", 0) or 0)
                     market.liquidity += float(sub_market.get("liquidity", 0) or 0)
