@@ -247,11 +247,15 @@ class MarketScanner:
         "la": [r"los angeles", r"\bla\b"],
         "phoenix": [r"\bphoenix\b"],
         "denver": [r"\bdenver\b"],
+        "ankara": [r"\bankara\b"],
+        "wellington": [r"\bwellington\b"],
+        "buenos_aires": [r"buenos aires", r"\bbuenosaires\b"],
     }
 
     # City key to slug name mapping (for generating API slugs)
+    # NOTE: Polymarket uses "nyc" not "new-york-city" in slugs
     CITY_SLUG_NAMES: dict[str, str] = {
-        "nyc": "new-york-city",
+        "nyc": "nyc",
         "london": "london",
         "seoul": "seoul",
         "dallas": "dallas",
@@ -263,6 +267,9 @@ class MarketScanner:
         "la": "los-angeles",
         "phoenix": "phoenix",
         "denver": "denver",
+        "ankara": "ankara",
+        "wellington": "wellington",
+        "buenos_aires": "buenos-aires",
     }
 
     # Date patterns
