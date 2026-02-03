@@ -1,0 +1,249 @@
+# Polymarket Alpha Bot Configuration
+# Copy this to config.yaml and fill in your credentials
+
+# =============================================================================
+# API CREDENTIALS
+# =============================================================================
+
+credentials:
+  # Twitter/X API (Essential for breaking news)
+  twitter:
+    api_key: ""
+    api_secret: ""
+    bearer_token: ""
+    access_token: ""
+    access_token_secret: ""
+  
+  # News APIs
+  news:
+    newsapi_key: ""
+    # Optional: Reuters, AP require enterprise agreements
+  
+  # Telegram (for crypto alpha channels)
+  telegram:
+    api_id: ""
+    api_hash: ""
+    phone: ""
+  
+  # Blockchain RPC endpoints
+  blockchain:
+    ethereum_rpc: "https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY"
+    polygon_rpc: "https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY"
+    base_rpc: "https://base-mainnet.g.alchemy.com/v2/YOUR_KEY"
+  
+  # LLM APIs (for signal interpretation)
+  llm:
+    anthropic_api_key: ""
+    openai_api_key: ""  # Backup
+    preferred_provider: "anthropic"
+    model: "claude-sonnet-4-20250514"
+  
+  # Polymarket
+  polymarket:
+    private_key: ""  # Your wallet private key (BE CAREFUL)
+    api_key: ""
+    api_secret: ""
+    passphrase: ""
+
+# =============================================================================
+# SIGNAL SOURCES CONFIGURATION
+# =============================================================================
+
+signal_sources:
+  twitter:
+    enabled: true
+    # High-signal accounts to monitor (customize based on your markets)
+    accounts:
+      # Politics/Government
+      - "AP"
+      - "Reuters"
+      - "WSJ"
+      - "NYTimes"
+      - "BBCBreaking"
+      - "CNBCnow"
+      - "Bloomberg"
+      - "TheTerminal"
+      # Crypto specific
+      - "whale_alert"
+      - "WatcherGuru"
+      - "tier10k"
+      - "EmberCN"
+      # Sports
+      - "wojespn"
+      - "ShamsCharania"
+      - "AdamSchefter"
+      - "RapSheet"
+    
+    # Keywords that trigger deeper analysis
+    keywords:
+      - "BREAKING"
+      - "JUST IN"
+      - "OFFICIAL"
+      - "CONFIRMED"
+      - "ANNOUNCES"
+      - "ELECTED"
+      - "WINS"
+      - "DEAD"
+      - "RESIGNS"
+      - "NOMINATED"
+      - "SIGNED"
+      - "CEASEFIRE"
+      - "DEAL"
+    
+    # Rate limiting
+    check_interval_seconds: 2
+  
+  news:
+    enabled: true
+    sources:
+      - "associated-press"
+      - "reuters"
+      - "bbc-news"
+      - "bloomberg"
+      - "the-wall-street-journal"
+    check_interval_seconds: 30
+    
+  onchain:
+    enabled: true
+    # Whale wallets to track (examples - replace with actual)
+    tracked_wallets:
+      - address: "0x..."
+        label: "Jump Trading"
+      - address: "0x..."
+        label: "Wintermute"
+    # Token contracts to monitor for large movements
+    tracked_tokens:
+      - address: "0x..."
+        symbol: "USDC"
+        threshold: 1000000  # Alert on >$1M movements
+    check_interval_seconds: 5
+  
+  telegram:
+    enabled: false  # Requires setup
+    channels:
+      - "cryptonews"
+      - "whale_insider"
+    check_interval_seconds: 5
+  
+  rss:
+    enabled: true
+    feeds:
+      # Government/Official
+      - url: "https://www.whitehouse.gov/feed/"
+        category: "politics"
+      - url: "https://www.federalreserve.gov/feeds/press_all.xml"
+        category: "fed"
+      # Sports
+      - url: "https://www.espn.com/espn/rss/news"
+        category: "sports"
+    check_interval_seconds: 60
+
+# =============================================================================
+# MARKET CONFIGURATION
+# =============================================================================
+
+markets:
+  # How often to refresh the full market list
+  refresh_interval_seconds: 300
+  
+  # Price monitoring
+  price_check_interval_seconds: 1
+  
+  # Filters
+  min_liquidity: 10000  # Ignore markets with <$10k liquidity
+  min_volume_24h: 5000  # Ignore markets with <$5k daily volume
+  
+  # Categories to focus on (empty = all)
+  categories:
+    - "politics"
+    - "crypto"
+    - "sports"
+    - "entertainment"
+  
+  # Blacklist specific markets by ID
+  blacklist: []
+
+# =============================================================================
+# TRADING CONFIGURATION
+# =============================================================================
+
+trading:
+  enabled: false  # SET TO TRUE TO ENABLE LIVE TRADING
+  
+  # Risk management
+  max_position_size_usd: 1000
+  max_portfolio_exposure_usd: 10000
+  max_positions: 20
+  
+  # Edge thresholds
+  min_edge_percent: 15  # Only trade if estimated edge > 15%
+  min_probability_delta: 0.10  # Only trade if prob difference > 10%
+  
+  # Kelly criterion fraction (0.25 = quarter Kelly, more conservative)
+  kelly_fraction: 0.25
+  
+  # Price limits
+  max_buy_price: 0.85  # Don't buy above 85c
+  min_buy_price: 0.02  # Don't buy below 2c (too illiquid)
+  
+  # Execution
+  slippage_tolerance_percent: 2
+  max_retries: 3
+  
+  # Cooldowns
+  same_market_cooldown_seconds: 300  # Wait 5 min before trading same market again
+  
+  # Paper trading
+  paper_trading: true  # Simulate trades without real money
+
+# =============================================================================
+# LLM INTERPRETATION CONFIGURATION
+# =============================================================================
+
+llm:
+  # System prompt for signal interpretation
+  temperature: 0.1  # Low temperature for consistent analysis
+  max_tokens: 1000
+  
+  # Confidence thresholds
+  min_confidence_to_trade: 0.7
+  
+  # Caching
+  cache_identical_signals_seconds: 60
+
+# =============================================================================
+# LOGGING & MONITORING
+# =============================================================================
+
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
+  max_size_mb: 100
+  backup_count: 5
+  
+  # Log all signals (even if no trade)
+  log_all_signals: true
+  
+  # Log LLM prompts/responses (useful for debugging)
+  log_llm_calls: true
+
+monitoring:
+  # Prometheus metrics endpoint
+  enabled: true
+  port: 8000
+  
+  # Alerts (webhook for Discord/Slack)
+  alert_webhook: ""
+  alert_on_trade: true
+  alert_on_error: true
+
+# =============================================================================
+# DATABASE
+# =============================================================================
+
+database:
+  path: "data/bot.db"
+  
+  # How long to keep historical data
+  signal_retention_days: 90
+  trade_retention_days: 365
