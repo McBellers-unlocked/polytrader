@@ -42,11 +42,16 @@ async def analyze_72h():
         if ts < cutoff_72h:
             continue
 
-        act_type = act.get('type', '').lower()
-        outcome = act.get('outcome', '')
-        price = float(act.get('price', 0) or 0)
-        size = float(act.get('size', 0) or 0)
-        value = float(act.get('value', 0) or act.get('usdcSize', 0) or 0)
+        # Get activity type - API may use different field names
+        act_type = (act.get('type', '') or act.get('action', '') or '').lower()
+        outcome = act.get('outcome', '') or act.get('side', '')
+        price = float(act.get('price', 0) or act.get('avgPrice', 0) or 0)
+        size = float(act.get('size', 0) or act.get('shares', 0) or 0)
+        value = float(act.get('value', 0) or act.get('usdcSize', 0) or act.get('amount', 0) or 0)
+
+        # Also check for transaction-based data
+        if value == 0 and size > 0 and price > 0:
+            value = size * price
 
         # Extract city from title
         city = extract_city(title)
@@ -72,6 +77,7 @@ async def analyze_72h():
             'city': city,
             'bucket': bucket,
             'market_date': market_date,
+            'raw': act,  # Keep raw data for debugging
         })
 
     # Sort by timestamp (newest first)
@@ -82,11 +88,27 @@ async def analyze_72h():
     print(f"Analysis time: {now.strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 90)
 
-    # Separate by trade type
-    buys = [t for t in trades if t['type'] in ['buy', 'bought']]
-    claims = [t for t in trades if t['type'] in ['claim', 'redeem', 'claimed']]
-    losses = [t for t in trades if t['type'] in ['lost', 'loss']]
-    sells = [t for t in trades if t['type'] in ['sell', 'sold']]
+    # Debug: Show first few raw activities to understand the API format
+    if trades:
+        print("\n[DEBUG] Sample raw activity data:")
+        sample = trades[0]['raw']
+        for key in sorted(sample.keys())[:15]:
+            print(f"  {key}: {sample.get(key)}")
+
+    # Debug: Print all unique types found
+    unique_types = set(t['type'] for t in trades)
+    print(f"\nAPI activity types found: {unique_types}")
+
+    # Separate by trade type - be flexible with naming
+    buys = [t for t in trades if t['type'] in ['buy', 'bought', 'purchase', 'open']]
+    claims = [t for t in trades if t['type'] in ['claim', 'redeem', 'claimed', 'won', 'payout', 'settle']]
+    losses = [t for t in trades if t['type'] in ['lost', 'loss', 'expired', 'resolve']]
+    sells = [t for t in trades if t['type'] in ['sell', 'sold', 'close']]
+
+    # Catch-all for unknown types
+    unknown = [t for t in trades if t not in buys + claims + losses + sells]
+    if unknown:
+        print(f"Unknown activity types: {set(t['type'] for t in unknown)}")
 
     print(f"\nTotal activities in 72h: {len(trades)}")
     print(f"  Buys: {len(buys)}")
