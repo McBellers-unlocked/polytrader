@@ -74,6 +74,9 @@ from src.execution.sessions import get_session_manager, TradingSession
 # CLI dashboard
 from src.cli.dashboard import Dashboard
 
+# Trade logging for analysis
+from src.trade_logger import log_trade_from_opportunity
+
 logger = get_logger(__name__)
 
 
@@ -1858,6 +1861,13 @@ class TradingBot:
                 size=str(opp.suggested_size),
                 edge=opp.edge,
                 order_id=result.order_id,
+            )
+
+            # Log trade with full forecast data for analysis
+            log_trade_from_opportunity(
+                action="EXECUTED",
+                opp=opp,
+                order_id=result.order_id or "",
             )
 
             # Record the position so we don't repeat the same trade
