@@ -344,12 +344,22 @@ class MarketScanner:
             if not isinstance(event_data, dict):
                 logger.warning(f"Skipping non-dict event item: {type(event_data).__name__}")
                 continue
+
+            # Debug: Log event title
+            event_title = event_data.get('title', '') or event_data.get('question', '') or 'Unknown'
+            logger.info(f"Processing event: {event_title[:60]}")
+
             market = self._parse_event_to_market(event_data)
             if market is None:
+                logger.info(f"Failed to parse event: {event_title[:60]}")
                 continue
 
             # Filter for valid temperature markets
             if not self._is_temperature_market(market):
+                logger.info(
+                    f"Not a temp market: city={market.city.name if market.city else None}, "
+                    f"buckets={len(market.buckets)}, title={event_title[:40]}"
+                )
                 continue
 
             # Skip inactive unless requested
